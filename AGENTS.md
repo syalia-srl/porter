@@ -136,8 +136,12 @@ done twice.)*
   `site-packages`. 13 tests. The guard refuses any root that is a virtualenv, is
   not under `uv python dir`, or lacks the stdlib — because the pre-guard code
   returned *successfully* with the wrong tree while every test stayed green.
-- **Next:** Task 2, `src/porter/deb.py` — staged tree → `.deb`, with the FHS
-  ownership lint.
+- **Task 2 done:** `src/porter/deb.py` — `build_deb()` turns a staged tree into a
+  `.deb` through a hand-written `DEBIAN/`, refusing any stage that writes to
+  `/var/lib` or `/var/log`, carries `/etc/<pkg>/env`, or carries `.venv`/`.git`/
+  `.env`. 15 tests, each asserted against the built artefact. `__pycache__` is
+  *not* treated as residue: a vendored interpreter ships 35 such directories.
+- **Next:** Task 3 — stage a vendored interpreter plus app code and package it.
 
 The `porter.yaml` schema is defined by the example gallery: each example is a
 manifest that must parse and build, so a field with no example exercising it does
