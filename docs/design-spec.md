@@ -303,7 +303,7 @@ that look like passes on the build host.
 <vendor>-<app>-<version>/
   repo/{Packages,Packages.gz,Release,Release.gpg,*.deb}
   install.sh        # adds the repo + key, apt install, then <app>-setup
-  LEEME.txt
+  README.txt
 ```
 
 Because config is split, no conffile can ever conflict, so no `--force-confold`

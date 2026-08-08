@@ -25,7 +25,7 @@ Copied verbatim from `docs/design-spec.md`. Every task's requirements implicitly
 - **The `Packages` index is emitted from `dpkg-deb --field`**, not `dpkg-scanpackages` (`dpkg-dev` is absent on demos).
 - **Never pipe a gate.** `cmd | tail` hands `&&` the exit code of `tail`. Read every `rc` directly.
 - **Every gate assertion carries a positive control or a magnitude check.**
-- English for all code, comments, identifiers, log messages, tests, commits. Generated operator-facing files (`LEEME.txt`) are Spanish for UNE.
+- **English for everything porter produces**: code, comments, identifiers, log messages, CLI flags and help text, generated `install.sh` and `README.txt`, tests, docs, commits. porter ships no Spanish. A component may pass its own operator text in as data; porter never bakes a language in.
 
 ## File Structure
 
@@ -553,7 +553,7 @@ git commit -m "feat(config): split package-owned defaults from admin-owned env; 
 
 **Interfaces:**
 - Consumes: `build_deb` (Task 2).
-- Produces: `write_index(repo_dir: Path) -> Path` (writes `Packages`, `Packages.gz`, `Release`); `usb_tree(debs: list[Path], out: Path, app: str, leeme: str) -> Path`.
+- Produces: `write_index(repo_dir: Path) -> Path` (writes `Packages`, `Packages.gz`, `Release`); `usb_tree(debs: list[Path], out: Path, app: str, readme: str) -> Path`.
 
 - [ ] **Step 1: Write the failing tests**
 
@@ -582,7 +582,7 @@ def test_install_then_upgrade_offline_from_the_usb_tree(two_demo_debs, tmp_path,
     """The delivery promise: the SAME command installs and upgrades. Every
     network apt source is removed inside the container, so a working mirror
     cannot rescue a broken local repo and make this test a lie."""
-    out = usb_tree(two_demo_debs, tmp_path / "usb", app="demo-app", leeme="Instalacion\n")
+    out = usb_tree(two_demo_debs, tmp_path / "usb", app="demo-app", readme="Installation\n")
     script = (
         "set -e;"
         "rm -f /etc/apt/sources.list /etc/apt/sources.list.d/*.sources /etc/apt/sources.list.d/*.list;"
@@ -634,13 +634,13 @@ set -euo pipefail
 HERE="$(cd "$(dirname "$0")" && pwd)"
 VERSION=""
 [ "${{1:-}}" = "--version" ] && {{ VERSION="={{2}}"; shift 2; }}
-[ "$(id -u)" -eq 0 ] || {{ echo "Ejecute como root: sudo bash $0" >&2; exit 1; }}
+[ "$(id -u)" -eq 0 ] || {{ echo "Run as root: sudo bash $0" >&2; exit 1; }}
 
 echo "deb [trusted=yes] file:${{HERE}}/repo ./" > /etc/apt/sources.list.d/{app}.list
 apt-get update -o Dir::Etc::sourcelist="sources.list.d/{app}.list" \\
                 -o Dir::Etc::sourceparts="-" -o APT::Get::List-Cleanup="0" -qq
 apt-get install -y -qq --allow-downgrades "{app}${{VERSION}}"
-echo "✅ {app} instalado. Configure /etc/{app}/env y luego: systemctl restart {app}"
+echo "OK: {app} installed. Edit /etc/{app}/env, then: systemctl restart {app}"
 """
 
 
@@ -666,7 +666,7 @@ def write_index(repo_dir: Path) -> Path:
     return packages
 
 
-def usb_tree(debs: list[Path], out: Path, app: str, leeme: str) -> Path:
+def usb_tree(debs: list[Path], out: Path, app: str, readme: str) -> Path:
     out = Path(out)
     repo = out / "repo"
     repo.mkdir(parents=True, exist_ok=True)
@@ -675,7 +675,7 @@ def usb_tree(debs: list[Path], out: Path, app: str, leeme: str) -> Path:
     write_index(repo)
     (out / "install.sh").write_text(INSTALL_SH.format(app=app))
     (out / "install.sh").chmod(0o755)
-    (out / "LEEME.txt").write_text(leeme)
+    (out / "README.txt").write_text(readme)
     return out
 ```
 
@@ -890,7 +890,7 @@ python: "3.12"
 components:
   - name: sigere-api
     package: une-sigere-api
-    description: Adaptador HTTP de solo lectura sobre el SQL Server de SIGERE
+    description: Read-only HTTP adapter over the SIGERE SQL Server
     entrypoint: apps.sigere.backend.main:app
     source_paths: [apps/sigere, apps/__init__.py]
     requirements: deploy/release/sigere-api/requirements.txt

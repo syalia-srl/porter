@@ -62,12 +62,15 @@ when isolation is off. Before trusting an artefact, assert its magnitude. And
 
 ## Language policy
 
-English for every artifact: code, comments, identifiers, error strings, log
-messages, commit messages, CLI flags and help text, tests, docs.
+**English for everything, with no exceptions.** Code, comments, identifiers,
+error strings, log messages, commit messages, CLI flags and help text, tests,
+docs — and equally the files porter *generates*: `install.sh`, `README.txt`,
+every banner and every prompt.
 
-The **generated** operator-facing files (`LEEME.txt`, the `install.sh` banner)
-are written in the language of whoever will run them — Spanish for UNE. That is
-package *content*, not porter's own surface.
+porter ships no Spanish. If a component needs operator text in another language,
+it passes that text in as data (`readme=`, a component `description`); porter
+never bakes a language into its own output. A tool whose audience is
+Spanish-speaking is still an English tool.
 
 ## Documents
 
