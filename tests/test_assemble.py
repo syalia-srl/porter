@@ -12,11 +12,12 @@ And the cheap refusals come first, because they raise before anything vendors a
 97 MB tree.
 """
 import os
+import shutil
 import subprocess
 from pathlib import Path
 
 import pytest
-from conftest import _require_uv
+from conftest import EXAMPLE, _require_uv
 
 from porter.assemble import assemble
 from porter.deb import build_deb
@@ -78,6 +79,38 @@ def test_refuses_config_on_a_command(tmp_path, src_tree):
 def test_refuses_a_command_with_no_bin_name(tmp_path, src_tree):
     with pytest.raises(ValueError, match="bin_name"):
         assemble(_cmd(bin_name=None), PY, src_tree, tmp_path / "s")
+
+
+def test_refuses_a_source_directory_that_stages_its_modules_below_the_import_root(
+        tmp_path, src_tree):
+    """`source: ["src"]` -- which this task's brief wrote -- copies the
+    directory under its own name and leaves app.py at /usr/lib/<pkg>/src/app.py,
+    one level below the WorkingDirectory that is the only thing on sys.path.
+    The package builds, lints, installs at rc=0 and dies at its first request.
+
+    The import probe cannot see it: a directory with no __init__.py is a
+    namespace package, so find_spec("src") *succeeds* and reports a directory
+    holding nothing importable (measured 2026-08-08). Refused before anything
+    vendors, which is why this test costs nothing.
+    """
+    with pytest.raises(ValueError, match="below the import root"):
+        assemble(_cmd(source_paths=["src"]), PY, src_tree, tmp_path / "s")
+
+
+def test_a_source_directory_carrying_no_modules_is_data_and_is_staged(tmp_path, src_tree):
+    """The positive control for the refusal above, and it is the whole reason
+    that refusal reads the directory's contents rather than its shape: a guard
+    that refused every directory would satisfy the test above just as well, and
+    templates/ and static/ are legitimate payload with nowhere else to go."""
+    _require_uv()
+    root = tmp_path / "with-data"
+    (root / "src/assets").mkdir(parents=True)
+    shutil.copy(src_tree / "src/hello.py", root / "src/hello.py")
+    (root / "src/assets/banner.txt").write_text("not a module\n")
+
+    component = _cmd(source_paths=["src/hello.py", "src/assets"])
+    st = assemble(component, PY, root, tmp_path / "s")
+    assert (st.stage / f"usr/lib/{component.package}/assets/banner.txt").exists()
 
 
 def test_refuses_a_stage_root_that_is_not_empty(tmp_path, src_tree):
@@ -259,3 +292,30 @@ def test_refuses_a_module_the_staged_interpreter_cannot_import(tmp_path, src_tre
     _require_uv()
     with pytest.raises(RuntimeError, match="cannot import"):
         assemble(_cmd(module="uvicorn", requirements=[]), PY, src_tree, tmp_path / "s")
+
+
+def test_refuses_an_import_the_payload_makes_that_the_interpreter_cannot_find(
+        demo_manifest, tmp_path):
+    """The same airgap failure one argument further out, and the likelier one.
+
+    `module` is the runner -- `uvicorn` for the gallery -- and `app:app` is
+    uvicorn's argument, which nothing in porter parses. So the runner probe is
+    perfectly satisfied by a manifest that forgot the payload's own dependency:
+    uvicorn imports, the .deb builds, lints and installs at rc=0, and the first
+    HTTP request dies on a client with no network to fix it from. A runner is
+    named in `exec:` where it is hard to forget; a payload's imports are named
+    nowhere in the manifest at all.
+
+    The gallery's app.py imports `fastapi`, so dropping it from `requirements`
+    is that mistake exactly.
+    """
+    _require_uv()
+    trimmed = [r for r in demo_manifest["requirements"] if r != "fastapi"]
+    # If the example ever stops requiring fastapi this test would silently
+    # assert nothing: it would be probing an unmodified manifest.
+    assert trimmed != demo_manifest["requirements"]
+
+    component, python = Component.from_manifest(
+        {**demo_manifest, "requirements": trimmed})
+    with pytest.raises(RuntimeError, match="app.py imports 'fastapi'"):
+        assemble(component, python, EXAMPLE, tmp_path / "s")

@@ -164,6 +164,46 @@ check "T4 the staged interpreter must be able to import the module" src/porter/a
 # the designed outcome and the reason assemble returns them at all.
 check "T4 conffiles are derived from the staged etc/ tree" src/porter/assemble.py \
   's = s.replace("return sorted(found)", "return []")' tests/test_assemble.py
+# `module` is the RUNNER (uvicorn) and the payload is its argument, so the probe
+# above is satisfied by a manifest that forgot fastapi. Removed, the gallery
+# builds and installs at rc=0 and dies at the first HTTP request on the client.
+check "T4 the payload's own imports must be findable too" src/porter/assemble.py \
+  's = s.replace("if found.returncode != 0:", "if False:")' tests/test_assemble.py
+# The one failure neither probe can see: find_spec("src") SUCCEEDS on a
+# directory with no __init__.py -- it is a namespace package -- while nothing
+# inside it is importable from the payload root. Removed, `source: [src]` stages
+# a payload one directory below WorkingDirectory and ships at rc=0.
+check "T4 a source directory below the import root is refused" src/porter/assemble.py \
+  's = s.replace("if modules:", "if False:")' tests/test_assemble.py
+
+echo "════ Task 4 fix 1 — the entry point, which had no test at all ════"
+# THE entry: every assemble test passes an absolute tmp_path, so the suite was
+# blind to `porter build`'s own defaults being relative. Removed, the import
+# probe execs a relative interpreter path with cwd= set below it, the child
+# chdir's before exec, and `porter build` fails on porter's own example.
+# tests/test_assemble.py stays GREEN under this mutation -- that is the finding.
+check "T4 stage_root is resolved before anything execs out of it" src/porter/assemble.py \
+  's = s.replace("Path(stage_root).resolve()", "Path(stage_root)")' tests/test_cli.py
+# porter invents the stage, so porter removes it. Removed, a 97 MB tree survives
+# every run: the command succeeds exactly once and then reports a refusal about
+# a directory the user never created, and a failure reports a different error
+# the second time than the first.
+check "T4 the CLI removes the stage it created, pass or fail" src/porter/cli.py \
+  's = s.replace("if ours:", "if False:")' tests/test_cli.py
+# microcli registers an optional with help=argparse.SUPPRESS when its
+# Annotated[...] help is empty. Emptied, --out and --stage vanish from --help
+# entirely while still working: functional, undiscoverable.
+check "T4 --out and --stage are documented where argparse can see it" src/porter/cli.py \
+  's = s.replace("directory the .deb is written to", "")' tests/test_cli.py
+
+echo "════ Task 4 fix 1 — the porter.spec seam ════"
+# spec.py re-exports rather than redefines, so Task 7 adds a validator instead
+# of giving the gallery a second schema. Mutated into its own definitions --
+# exactly what "Task 7 duplicates" looks like -- the identity assertion is the
+# only thing anywhere that notices.
+check "T4 porter.spec re-exports porter.types, never redefines it" src/porter/spec.py \
+  's = s.replace("from porter.types import Component, Python", "class Component: pass\nclass Python: pass")' \
+  tests/test_types.py
 
 echo
 echo "════ control: suite green again after every restore ════"

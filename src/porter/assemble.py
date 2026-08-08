@@ -21,12 +21,21 @@ entry is staged under its own basename and `module` names it --
 and `app` is importable for exactly that reason. Staging `src/` whole would put
 the payload one directory below the import root and the service would fail at
 its first request, on the client, with the package having installed at rc=0.
+Three checks hold that, and it takes all three, because each is blind to the
+others' failure: `module` must be importable (the runner -- `uvicorn`), the
+payload's own top-level imports must be importable (`fastapi`, which is what
+the gallery's app actually needs and which `module` never names), and a source
+entry may not be a directory that leaves its modules one level below the import
+root (`source: ["src"]`). Only the third can catch that last one: a directory
+with no `__init__.py` is a *namespace package*, so `find_spec("src")` succeeds
+while nothing inside it is importable (measured 2026-08-08).
 
 Refusals here follow deb.py's precedent: **refuse, never repair.** A stage
 porter quietly fixes is a stage whose next surprise ships.
 """
 from __future__ import annotations
 
+import ast
 import os
 import shlex
 import shutil
@@ -120,6 +129,25 @@ def _refuse_what_porter_cannot_emit(component: Component, python: Python) -> Non
             )
 
 
+def _probe_import(python_bin: Path, workdir: Path,
+                  name: str) -> subprocess.CompletedProcess:
+    """Can the **staged** interpreter find `name` from the **payload directory**?
+
+    Those two are what decide the answer on the client, so both are what the
+    probe uses -- with `PYTHONPATH` and `PYTHONHOME` stripped, so the build
+    host's environment cannot answer on the client's behalf. `find_spec`
+    locates without importing, so a module with import-time side effects is not
+    executed here.
+    """
+    env = {k: v for k, v in os.environ.items() if k not in ("PYTHONPATH", "PYTHONHOME")}
+    return subprocess.run(
+        [str(python_bin), "-c",
+         ("import importlib.util, sys; "
+          "sys.exit(0 if importlib.util.find_spec(sys.argv[1]) else 1)"),
+         name],
+        cwd=workdir, env=env, capture_output=True, text=True)
+
+
 def _refuse_a_module_the_interpreter_cannot_import(
         python_bin: Path, workdir: Path, module: str) -> None:
     """The staged interpreter must be able to find the module the package runs.
@@ -132,19 +160,12 @@ def _refuse_a_module_the_interpreter_cannot_import(
     status. Nothing else in the pipeline reads `module` at all: deb.py sees a
     directory of bytes, systemd.py sees a string.
 
-    Run against the **staged** interpreter from the **payload directory** --
-    the two things that decide the answer on the client -- with `PYTHONPATH`
-    and `PYTHONHOME` stripped, so the build host's environment cannot answer on
-    the client's behalf. `find_spec` locates without importing, so a module with
-    import-time side effects is not executed here.
+    This covers the **runner** and only the runner. `module` is `uvicorn` for
+    the gallery and the payload is uvicorn's *argument*, so
+    `_refuse_an_import_the_payload_makes_that_the_interpreter_cannot_find` is
+    the other half and neither substitutes for the other.
     """
-    env = {k: v for k, v in os.environ.items() if k not in ("PYTHONPATH", "PYTHONHOME")}
-    probe = subprocess.run(
-        [str(python_bin), "-c",
-         ("import importlib.util, sys; "
-          "sys.exit(0 if importlib.util.find_spec(sys.argv[1]) else 1)"),
-         module],
-        cwd=workdir, env=env, capture_output=True, text=True)
+    probe = _probe_import(python_bin, workdir, module)
     if probe.returncode != 0:
         raise RuntimeError(
             f"the staged interpreter cannot import {module!r} from the payload "
@@ -152,6 +173,115 @@ def _refuse_a_module_the_interpreter_cannot_import(
             f"Is it missing from requirements? rc={probe.returncode} "
             f"{probe.stderr.strip()}"
         )
+
+
+def _payload_front_doors(libdir: Path, source_paths: list[str]) -> list[Path]:
+    """The staged files the client imports first, and only those.
+
+    A `.py` entry is its own front door; a package directory's is its
+    `__init__.py`. Everything the package imports beyond those is reached
+    *through* them, and walking a payload in full is how a `tests/` directory
+    inside it makes `import pytest` a build-time requirement.
+    """
+    doors = []
+    for entry in source_paths:
+        staged = libdir / Path(entry).name
+        if staged.is_dir():
+            if (staged / "__init__.py").exists():
+                doors.append(staged / "__init__.py")
+        elif staged.suffix == ".py":
+            doors.append(staged)
+    return doors
+
+
+def _unconditional_imports(path: Path) -> list[str]:
+    """The module names `path` imports at import time, no matter what.
+
+    Direct children of the module body only, deliberately. An import inside a
+    `try: ... except ImportError:` or under an `if sys.platform ...` is an
+    optional dependency, and refusing a package for one it declares optional is
+    a refusal that fires on a *correct* manifest. A relative import names
+    nothing the interpreter could be asked about. `import a.b` is asked as `a`,
+    because `find_spec` on a dotted name imports the parent package to find the
+    child -- and nothing here may execute payload code.
+    """
+    names = []
+    for node in ast.parse(path.read_text(), filename=str(path)).body:
+        if isinstance(node, ast.Import):
+            names += [alias.name.split(".")[0] for alias in node.names]
+        elif isinstance(node, ast.ImportFrom) and node.level == 0 and node.module:
+            names.append(node.module.split(".")[0])
+    return sorted(set(names))
+
+
+def _refuse_an_import_the_payload_makes_that_the_interpreter_cannot_find(
+        python_bin: Path, libdir: Path, source_paths: list[str]) -> None:
+    """The payload's own dependencies, which `module` does not name.
+
+    The check above proves the *runner* importable. For the gallery that is
+    `uvicorn` -- and `app:app` is uvicorn's argument, which nothing in porter
+    parses, so what the app itself needs is invisible to it. Drop `fastapi`
+    from `requirements` and the runner probe is perfectly satisfied: uvicorn
+    imports, the .deb builds, lints and installs at rc=0, and the first HTTP
+    request dies on a client with no network to fix it from. That is the same
+    airgap failure one argument further out, and it is the likelier of the two
+    -- a runner is named in `exec:` where it is hard to forget, and a payload's
+    imports are named nowhere in the manifest at all.
+
+    Read statically and probed with `find_spec`: neither this nor the runner
+    check may *execute* payload code, because a module that opens a socket or
+    reads its config at import time is a legitimate payload and would otherwise
+    fail the build.
+    """
+    for door in _payload_front_doors(libdir, source_paths):
+        for name in _unconditional_imports(door):
+            found = _probe_import(python_bin, libdir, name)
+            if found.returncode != 0:
+                raise RuntimeError(
+                    f"the payload's {door.name} imports {name!r} and the staged "
+                    f"interpreter cannot find it from the payload directory "
+                    f"({libdir}), so the package installs at rc=0 and dies the "
+                    f"first time that import runs on the client. Is it missing "
+                    f"from requirements? rc={found.returncode} {found.stderr.strip()}"
+                )
+
+
+def _refuse_a_source_directory_below_the_import_root(
+        src_root: Path, source_paths: list[str]) -> None:
+    """A staged directory whose modules nothing on the client can import.
+
+    `source: ["src"]` is the obvious thing to write -- this task's own brief
+    wrote it -- and it copies `src/` in whole, leaving `app.py` one directory
+    below `/usr/lib/<pkg>`. `python -m` prepends only the working directory and
+    under `ProtectSystem=strict` nothing else is on `sys.path`, so `app` is not
+    importable: the package builds, lints, installs at rc=0 and dies at its
+    first request, on the client.
+
+    The interpreter probe cannot see this, which is why the check is here and
+    not there: a directory with no `__init__.py` is a *namespace package*, so
+    `find_spec("src")` succeeds and reports a directory that holds nothing
+    importable. The predicate is therefore on the tree -- a directory carrying
+    top-level `.py` files and no `__init__.py` is code staged one level too
+    deep. A directory with no `.py` files in it is data (templates, static
+    assets), which is a legitimate payload and is left alone.
+
+    Checked against the source rather than the stage so it raises before 97 MB
+    of interpreter is vendored for a tree that cannot work.
+    """
+    for entry in source_paths:
+        src = src_root / entry
+        if not src.is_dir() or (src / "__init__.py").exists():
+            continue
+        modules = sorted(p.name for p in src.iterdir() if p.suffix == ".py")
+        if modules:
+            raise ValueError(
+                f"source entry {entry!r} stages {', '.join(modules)} one directory "
+                f"below the import root: they land in /usr/lib/<pkg>/{Path(entry).name}/ "
+                "and the unit's WorkingDirectory is /usr/lib/<pkg>, which is the only "
+                "thing on sys.path. Name the module directly "
+                f"(source: [{entry}/{modules[0]}]) or give {Path(entry).name!r} an "
+                "__init__.py and import it as a package"
+            )
 
 
 def _conffiles(stage: Path) -> list[str]:
@@ -198,10 +328,17 @@ exec {argv}
 def assemble(component: Component, python: Python,
              src_root: Path, stage_root: Path) -> Staged:
     """Stage `component` under `stage_root`. Returns what `build_deb` needs."""
-    src_root, stage = Path(src_root), Path(stage_root)
+    # Resolved, and not merely wrapped in Path: `porter build`'s own --stage
+    # default is the relative "build", and the import probe execs the staged
+    # interpreter with `cwd=libdir`. The child chdir's before exec, so a
+    # relative program path is resolved against the *new* directory and cannot
+    # be found -- `porter build` failed on porter's own example for exactly
+    # this, while all 18 tests here passed absolute tmp_paths and saw nothing.
+    src_root, stage = Path(src_root), Path(stage_root).resolve()
     pkg = component.package
 
     _refuse_what_porter_cannot_emit(component, python)
+    _refuse_a_source_directory_below_the_import_root(src_root, component.source_paths)
 
     # Refused rather than emptied, which is deb.py's argument about DEBIAN/ one
     # step earlier: a second `porter build` into a directory that still holds
@@ -272,6 +409,8 @@ def assemble(component: Component, python: Python,
         wrapper.chmod(0o755)  # dpkg preserves the mode; without it, not runnable
 
     _refuse_a_module_the_interpreter_cannot_import(python_bin, libdir, component.module)
+    _refuse_an_import_the_payload_makes_that_the_interpreter_cannot_find(
+        python_bin, libdir, component.source_paths)
 
     control = {
         "Package": pkg,
