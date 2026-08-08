@@ -40,17 +40,28 @@ import os
 import shlex
 import shutil
 import subprocess
+from collections.abc import Sequence
 from dataclasses import dataclass
 from pathlib import Path
 
 from porter.config import env_postinst, setup_script, split
 from porter.interpreter import install, vendor
-from porter.systemd import unit
+from porter.systemd import resolve_ordering, timer, unit
 from porter.types import Component, Python
 
-# The shapes porter can emit a *correct* package for today. `oneshot` is absent
-# on purpose; see _refuse_what_porter_cannot_emit.
-SUPPORTED_KINDS = ("service", "command")
+# The shapes porter can emit a *correct* package for today.
+#
+# `oneshot` was absent until Task 11, and the refusal that stood here is worth
+# remembering: it was not squeamishness, it was that `unit()` emitted no `Type=`
+# and no `.timer` and the postinst enabled `<pkg>.service` unconditionally, so a
+# job pushed through them installed at rc=0 and ran as a permanently-restarting
+# service. All three are now emitted correctly (`systemd.unit(kind="oneshot")`,
+# `systemd.timer`, and `[Install] Also=` so that the *existing* postinst enables
+# the timer), and `examples/oneshot-timer` is the entry that defines the shape.
+SUPPORTED_KINDS = ("service", "command", "oneshot")
+
+# The kinds that get a systemd unit rather than a /usr/bin wrapper.
+UNIT_KINDS = ("service", "oneshot")
 
 
 @dataclass
@@ -75,14 +86,6 @@ def _refuse_what_porter_cannot_emit(component: Component, python: Python) -> Non
     Each of these has a plausible-looking wrong answer, which is why it is a
     refusal and not a default:
 
-    - **`oneshot`.** `systemd.unit()` takes no `Type=` and always emits
-      `Restart=on-failure` plus `WantedBy=multi-user.target`, and
-      `config.env_postinst` enables `<pkg>.service` unconditionally. Pushed
-      through those, a "scheduled job" installs at rc=0 and runs as a
-      permanently-restarting service with no timer anywhere. The gallery entry
-      (`examples/oneshot-timer`, listed in docs/design-spec.md and not yet
-      written) is what unblocks it, together with a `Type=`/`timer()` pair in
-      systemd.py and a postinst that knows which unit to enable.
     - **A misspelled kind.** `kind: sevice` would otherwise stage a payload with
       no unit and no wrapper: a .deb that builds, lints, installs cleanly and
       does nothing at all.
@@ -98,14 +101,15 @@ def _refuse_what_porter_cannot_emit(component: Component, python: Python) -> Non
     - **A command declaring `migrations:`.** The command branch emits no
       postinst, so dpkg would have nothing to call them from: the upgrade would
       succeed at rc=0 having migrated nothing.
+    - **A command declaring `after:`.** A wrapper in /usr/bin is not a unit;
+      systemd has nothing to order, so the declaration would be read, accepted
+      and dropped. porter's characteristic bug is the silently ignored input,
+      not the loud one.
+    - **A `service` declaring `schedule:`.** The schedule reaches a `.timer`
+      that only the oneshot branch writes, so a service that declares one gets
+      a package that runs continuously and never on the calendar its author
+      asked for -- at rc=0, with the manifest saying otherwise.
     """
-    if component.kind == "oneshot":
-        raise ValueError(
-            "kind 'oneshot' is not implemented: systemd.unit() emits no Type= and "
-            "no .timer, and config.env_postinst enables <pkg>.service "
-            "unconditionally -- a oneshot pushed through them installs at rc=0 as "
-            "a restarting service. Add examples/oneshot-timer first"
-        )
     if component.kind not in SUPPORTED_KINDS:
         raise ValueError(
             f"unknown component kind {component.kind!r}: porter emits "
@@ -119,10 +123,24 @@ def _refuse_what_porter_cannot_emit(component: Component, python: Python) -> Non
             "is. An interpreter shipped in a package of its own has no known "
             "install path here, so ExecStart would be a guess"
         )
+    if component.kind == "service" and component.schedule:
+        raise ValueError(
+            f"component {component.name!r} is kind 'service' and declares "
+            f"schedule: {component.schedule!r}. Only 'oneshot' emits a .timer, so "
+            "the schedule would be silently dropped and the service would run "
+            "continuously instead. Use kind: oneshot"
+        )
     if component.kind == "command":
         if not component.bin_name:
             raise ValueError("a 'command' component needs bin_name: there is no name "
                              "to install under /usr/bin")
+        if component.after:
+            raise ValueError(
+                f"a 'command' component may not declare after: "
+                f"{component.after!r}. It installs a wrapper in /usr/bin and no "
+                "unit, so there is nothing for systemd to order and the "
+                "declaration would be read and dropped"
+            )
         if component.defaults or component.admin_keys:
             raise ValueError(
                 "a 'command' component may not declare config: postinst would create "
@@ -337,7 +355,8 @@ exec {argv}
 
 
 def assemble(component: Component, python: Python,
-             src_root: Path, stage_root: Path, stamp: str | None = None) -> Staged:
+             src_root: Path, stage_root: Path, stamp: str | None = None,
+             siblings: Sequence[Component] = ()) -> Staged:
     """Stage `component` under `stage_root`. Returns what `build_deb` needs.
 
     `stamp` is `porter.bake`'s provenance block, written to
@@ -345,6 +364,15 @@ def assemble(component: Component, python: Python,
     the top-level allowlist. bake cannot write it itself: the stage does not
     exist when bake runs, and `assemble` refuses to build into one that is
     already populated.
+
+    `siblings` is **every component the manifest declares, this one included**,
+    and it is what turns `after: [alpha]` into `After=demo-alpha.service`. It
+    is passed rather than resolved by the caller so that a caller which forgets
+    it cannot silently ship a package with its ordering dropped: with no
+    siblings, a component that declares `after:` names something the (one-entry)
+    manifest does not provide and `resolve_ordering` refuses it. A component
+    that declares no ordering is unaffected, which is the single-component
+    project and the common case.
     """
     # Resolved, and not merely wrapped in Path: `porter build`'s own --stage
     # default is the relative "build", and the import probe execs the staged
@@ -357,6 +385,9 @@ def assemble(component: Component, python: Python,
 
     _refuse_what_porter_cannot_emit(component, python)
     _refuse_a_source_directory_below_the_import_root(src_root, component.source_paths)
+    # Before 97 MB is vendored: a cycle or a misspelled `after:` is a property
+    # of the manifest and needs nothing staged to detect.
+    depends_on = resolve_ordering(list(siblings) or [component])[component.name]
 
     # Refused rather than emptied, which is deb.py's argument about DEBIAN/ one
     # step earlier: a second `porter build` into a directory that still holds
@@ -416,7 +447,7 @@ def assemble(component: Component, python: Python,
     workdir = f"/usr/lib/{pkg}"
     scripts: dict[str, str] = {}
 
-    if component.kind == "service":
+    if component.kind in UNIT_KINDS:
         defaults, env_example = split(component.defaults, component.admin_keys)
         etc = stage / "etc" / pkg
         etc.mkdir(parents=True)
@@ -436,7 +467,15 @@ def assemble(component: Component, python: Python,
         units = stage / "usr/lib/systemd/system"
         units.mkdir(parents=True)
         (units / f"{pkg}.service").write_text(
-            unit(pkg, component.description, exec_start, workdir))
+            unit(pkg, component.description, exec_start, workdir,
+                 depends_on=depends_on, kind=component.kind))
+        if component.kind == "oneshot":
+            # The schedule is the whole point of the kind, so a oneshot with no
+            # `schedule:` is refused by `timer()` rather than defaulted: there
+            # is no interval porter could pick that is not a guess about the
+            # author's job, and a job that never fires reports nothing.
+            (units / f"{pkg}.timer").write_text(
+                timer(pkg, component.description, component.schedule))
         # The interactive half of rule 5, and only when there is something to
         # ask: postinst leaves /etc/<pkg>/env holding the right keys and no
         # values, and this is where a human fills them in. `setup_script`

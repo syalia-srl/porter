@@ -37,10 +37,21 @@ def build(
     stage: Annotated[str, "scratch directory the tree is assembled under; "
                           "porter removes the tree it creates there"] = "build",
 ) -> None:
-    """Build a .deb from a porter.yaml."""
+    """Build a .deb from a porter.yaml. One per component the manifest declares."""
     manifest_path = Path(manifest).resolve()
-    component, python = Component.from_manifest(
-        yaml.safe_load(manifest_path.read_text()))
+    # Every component, because a multi-service project is one manifest and
+    # several packages: `after:` names a sibling, and the ordering refusals need
+    # the whole list. A flat manifest comes back as a list of one, so the common
+    # case is unchanged.
+    pairs = Component.all_from_manifest(yaml.safe_load(manifest_path.read_text()))
+    siblings = [c for c, _ in pairs]
+    debs = [_build_one(c, py, manifest_path, out, stage, siblings)
+            for c, py in pairs]
+    m.ok(" ".join(f"{d} ({d.stat().st_size // 1024} KiB)" for d in debs))
+
+
+def _build_one(component, python, manifest_path: Path, out: str, stage: str,
+               siblings) -> Path:
     # Source paths are relative to the manifest, so a build run from anywhere
     # stages the same tree. A cwd-relative read is the shape that works in the
     # repo root and fails in CI.
@@ -69,13 +80,13 @@ def build(
         # which build it is running.
         baked = bake(component, manifest_path.parent)
         staged = assemble(component, python, manifest_path.parent, stage_dir,
-                          stamp=baked.stamp)
+                          stamp=baked.stamp, siblings=siblings)
         deb = build_deb(staged.stage, staged.control, Path(out),
                         conffiles=staged.conffiles, scripts=staged.scripts)
     finally:
         if ours:
             shutil.rmtree(stage_dir, ignore_errors=True)
-    m.ok(f"{deb} ({deb.stat().st_size // 1024} KiB)")
+    return deb
 
 
 def main() -> None:

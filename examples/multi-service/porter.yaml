@@ -1,0 +1,86 @@
+# porter's example gallery: several components, one manifest.
+#
+# This is ainbox's shape at a size that runs in a test. ainbox is ten compose
+# services wired with `depends_on`, and systemd has no equivalent of
+# `condition: service_healthy` -- there is no directive that means "wait until
+# the other one answers". What systemd has is `After=` (order the start jobs),
+# `Requires=` (couple the lifecycles) and `Restart=on-failure` (try again), and
+# porter emits all three. The dependent starts, finds its upstream not ready,
+# exits non-zero, and is restarted every RestartSec until it is. That is the
+# deliberate accepted behavioural change recorded in docs/design-spec.md, and
+# tests/test_ordering.py boots it under real systemd to prove it converges
+# rather than merely that the directives were written.
+#
+# ONE manifest, THREE packages. `after:` names a sibling component, and a
+# sibling in another file is a reference porter could not check -- so the
+# manifest is the unit that carries the graph, and `porter build` emits one
+# .deb per component. Install all three on a machine and the ordering resolves;
+# install one and it is a package like any other.
+
+# Shared by every component below. Written once because three components of one
+# suite that drift to three versions is exactly the drift porter exists to stop;
+# an entry may still override any of these.
+version: "1.0"
+maintainer: porter <porter@example.com>
+architecture: amd64
+
+python:
+  version: "3.12"
+  package: bundled
+
+components:
+  # The slow-starting upstream: it "loads its corpus" before binding its port.
+  # That is what makes this a real example rather than a diagram -- a service
+  # that is *active* and not yet *ready* is the case compose spells
+  # `condition: service_healthy` and systemd cannot express at all.
+  - name: alpha
+    package: demo-alpha
+    description: porter's example upstream A (slow start)
+    kind: service
+    source:
+      - src/alpha.py
+    exec:
+      module: alpha
+    env:
+      PORT: "9101"
+      # Seconds spent initialising before the port is bound. 0 here; the
+      # convergence test raises it through /etc/demo-alpha/env, which is the
+      # admin's half of the config split and overrides this value.
+      WARMUP_SECONDS: "0"
+
+  # The fast upstream. Present so the dependent has TWO dependencies: a single
+  # `after:` entry cannot tell a list that is emitted from a list that is
+  # truncated to its first element.
+  - name: beta
+    package: demo-beta
+    description: porter's example upstream B
+    kind: service
+    source:
+      - src/beta.py
+    exec:
+      module: beta
+    env:
+      PORT: "9102"
+
+  # The dependent. `after:` names COMPONENTS -- `alpha`, not
+  # `demo-alpha.service`. porter translates: the manifest is written in the
+  # author's vocabulary, the unit in systemd's, and `systemd.resolve_ordering`
+  # is the single place the two meet. A name no component provides is refused at
+  # build time, because systemd's own answer to a dependency on a unit that does
+  # not exist is to fail the start job on the client, at boot, with the package
+  # having installed at rc=0.
+  - name: gateway
+    package: demo-gateway
+    description: porter's example gateway, which needs both upstreams
+    kind: service
+    after:
+      - alpha
+      - beta
+    source:
+      - src/gateway.py
+    exec:
+      module: gateway
+    env:
+      PORT: "9100"
+      ALPHA_URL: http://127.0.0.1:9101/
+      BETA_URL: http://127.0.0.1:9102/

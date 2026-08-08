@@ -40,17 +40,11 @@ def _cmd(**kw) -> Component:
 # Each of these would otherwise produce an artefact at rc=0 -- which is the
 # failure class this repo exists to refuse, not an exception somewhere.
 
-def test_refuses_a_oneshot_it_could_only_ship_as_a_restarting_service(tmp_path, src_tree):
-    """unit() has no Type= and env_postinst enables <pkg>.service unconditionally,
-    so a 'scheduled job' pushed through them installs cleanly and runs forever.
-
-    Matched on `examples/oneshot-timer` and not on `oneshot`, because the
-    generic unknown-kind refusal below *also* names the kind it rejected: with
-    the specific branch removed, a bare `match="oneshot"` would still find its
-    own word in the generic message and report a guard that is gone as present.
-    """
-    with pytest.raises(ValueError, match="examples/oneshot-timer"):
-        assemble(_cmd(kind="oneshot", bin_name=None), PY, src_tree, tmp_path / "s")
+# `oneshot` was refused here by name until Task 11, because unit() emitted no
+# Type=, nothing emitted a .timer, and the postinst enabled <pkg>.service
+# unconditionally. All three are emitted correctly now, so the refusal and its
+# test are gone; tests/test_oneshot.py pins the behaviour that replaced them,
+# including the [Install] Also= line that keeps the postinst correct for a job.
 
 
 def test_refuses_a_kind_it_has_no_branch_for(tmp_path, src_tree):

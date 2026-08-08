@@ -95,6 +95,12 @@ class Component:
     defaults: dict[str, str] = field(default_factory=dict)
     admin_keys: list[str] = field(default_factory=list)
     bin_name: str | None = None  # command kind only
+    # Component NAMES -- `alpha`, not `demo-alpha.service`. The manifest is
+    # written in the author's vocabulary and systemd is spoken to in its own;
+    # `systemd.resolve_ordering` is the single place that translates, so a
+    # dependency can be misspelled in exactly one way and it is caught there.
+    after: list[str] = field(default_factory=list)
+    schedule: str | None = None  # oneshot kind only: the timer's OnCalendar=
     version: str = "1.0"
     architecture: str = "amd64"
     maintainer: str = "porter <porter@example.com>"
@@ -106,9 +112,11 @@ class Component:
     def from_manifest(cls, manifest: dict) -> tuple[Component, Python]:
         """Read a flat single-component `porter.yaml`.
 
-        Flat because the gallery is flat: `examples/service-fastapi/porter.yaml`
-        puts `package:` at the top level. A `components:` list is
-        `examples/suite`'s to introduce, and it does not exist yet.
+        Flat because the first gallery entry is flat:
+        `examples/service-fastapi/porter.yaml` puts `package:` at the top
+        level. `all_from_manifest` below reads the `components:` shape and
+        comes back through here for each entry, so there is one reader and not
+        two.
 
         No validation beyond KeyError. That is Task 7's, and a half-validator
         here would be the worse of the two outcomes: it would look like the
@@ -138,6 +146,8 @@ class Component:
                 defaults=dict(manifest.get("env", {})),
                 admin_keys=list(manifest.get("admin_keys", [])),
                 bin_name=manifest.get("bin_name"),
+                after=list(manifest.get("after", [])),
+                schedule=manifest.get("schedule"),
                 version=str(manifest["version"]),
                 architecture=manifest["architecture"],
                 maintainer=manifest["maintainer"],
@@ -150,6 +160,32 @@ class Component:
             Python(version=str(py.get("version", "3.12")),
                    package=py.get("package", "bundled")),
         )
+
+    @classmethod
+    def all_from_manifest(cls, manifest: dict) -> list[tuple[Component, Python]]:
+        """Every component a manifest declares, flat shape or `components:`.
+
+        A multi-service project is **one manifest and several packages**, not
+        several manifests: `after:` names a sibling, and a sibling in another
+        file is a reference porter cannot check. Both refusals in
+        `systemd.resolve_ordering` need the whole list at once, so the list is
+        what the reader produces.
+
+        Top-level keys are the shared ones and an entry overrides them --
+        `version`, `maintainer`, `architecture` and `python` are written once
+        for the project, because three components of one suite that drift to
+        three versions is the drift porter exists to stop.
+
+        Returned as **pairs**, not `(components, one Python)`: a component may
+        override `python:` and a single shared interpreter would be a claim
+        this reader is not entitled to make.
+        """
+        if "components" not in manifest:
+            return [cls.from_manifest(manifest)]
+        shared = {k: v for k, v in manifest.items() if k != "components"}
+        return [cls.from_manifest({**shared, **entry})
+                for entry in manifest["components"]]
+
 
 @dataclass(frozen=True)
 class Migration:

@@ -1,0 +1,66 @@
+# porter's example gallery: a scheduled job.
+#
+# The fourth of the shapes porter exists to serve (docs/design-spec.md's
+# adoption table): une-tools runs crawlers, ainbox runs pipelines. A job is not
+# a service that happens to exit -- it is a different unit shape, and porter
+# refused `kind: oneshot` outright until this example existed to define it,
+# because the three things that were wrong were each silent:
+#
+#   - no `Type=oneshot`, so systemd treats the fork as success and the job's own
+#     exit code is never anyone's business;
+#   - no `.timer`, so the schedule below would be read and dropped;
+#   - a postinst enabling `<pkg>.service` into `multi-user.target`, which turns
+#     a nightly job into a process that runs at boot and, with
+#     `Restart=on-failure`, restarts forever.
+#
+# What porter emits now: `<pkg>.service` with `Type=oneshot`, no `Restart=` (the
+# timer IS the retry -- a job that fails at 03:00 should next run at 03:00
+# tomorrow, not 28,800 times before then), and `[Install] Also=<pkg>.timer` with
+# no `WantedBy=`. That last line is what makes the *existing* postinst correct:
+# `systemctl enable <pkg>.service` follows `Also=` and enables the timer,
+# leaving the service itself `is-enabled` = `indirect` and unlinked from
+# multi-user.target. Measured 2026-08-08, asserted against the installed symlink
+# tree in tests/test_oneshot.py.
+
+package: demo-job
+version: "1.0"
+description: porter's example scheduled job
+maintainer: porter <porter@example.com>
+architecture: amd64
+
+kind: oneshot
+
+# The timer's `OnCalendar=`. systemd's calendar syntax, and porter validates it
+# at build time with `systemd-analyze calendar` -- a typo here is otherwise the
+# purest form of porter's characteristic bug: `systemctl enable` accepts a
+# timer whose expression systemd cannot parse, exits 0, creates the symlink,
+# and the job never fires. Measured 2026-08-08 with `OnCalendar=every
+# tuesday-ish`.
+#
+# `Persistent=true` is emitted alongside it, unconditionally: an appliance that
+# was switched off at 03:00 runs the job once at the next boot instead of
+# silently skipping the day.
+schedule: "*-*-* 03:00:00"
+
+source:
+  - src/job.py
+
+python:
+  version: "3.12"
+  package: bundled
+
+# No requirements: the job is standard library only. A real crawler would list
+# its dependencies here exactly as examples/service-fastapi does.
+
+exec:
+  module: job
+
+# A job gets the same two-file config split as a service, and for the same
+# reason: RETENTION_DAYS is ours to correct in a later version, API_TOKEN is the
+# client's and must survive every upgrade.
+env:
+  RETENTION_DAYS: "14"
+  API_TOKEN: ""
+
+admin_keys:
+  - API_TOKEN
