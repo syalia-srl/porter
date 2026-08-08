@@ -85,14 +85,32 @@ done
 # answer. A mutation harness that can make a concurrent reviewer read a mutant is
 # worse than no harness.
 #
+# Per-process scratch, and it is not a tidiness point. `rv.log` and `rv.keep`
+# were fixed /tmp paths, which was safe for exactly as long as this script was
+# only ever one process -- and stopped being safe the moment `--shard` made
+# concurrent runs a supported mode. `check` saves the original file to rv.keep
+# and restores from it, so two shards on one machine share that one path and
+# each restores the OTHER's file into its own worktree.
+#
+# Measured 2026-08-08 running shards 2-6 together: src/porter/assemble.py came
+# back as a different module entirely and tests/test_bake.py failed to import.
+# The worktrees kept the damage out of the checkout, and the per-scope baseline
+# refused to mutate on top of it -- rc=2 ABORT, not a green run over a corrupt
+# tree. That is the failure being caught rather than survived, but the harness
+# should not have needed catching.
+RVDIR=$(mktemp -d)
+RVLOG="$RVDIR/rv.log"
+RVKEEP="$RVDIR/rv.keep"
+
 # PORTER_GUARDS_INPLACE=1 opts out (CI, where the checkout is nobody else's).
 if [ "${PORTER_GUARDS_INPLACE:-0}" != 1 ]; then
   WT="$(mktemp -d)/guards"
   git -C "$REPO" worktree add --detach -q "$WT" HEAD || { echo "ABORT: cannot create worktree"; exit 2; }
-  trap 'git -C "$REPO" worktree remove --force "$WT" >/dev/null 2>&1; rm -rf "$(dirname "$WT")"' EXIT
+  trap 'git -C "$REPO" worktree remove --force "$WT" >/dev/null 2>&1; rm -rf "$(dirname "$WT")" "$RVDIR"' EXIT
   echo "  isolated in $WT ($(git -C "$WT" rev-parse --short HEAD))"
   cd "$WT" || exit 2
 else
+  trap 'rm -rf "$RVDIR"' EXIT
   echo "  IN-PLACE in $REPO — only safe when no peer shares this checkout"
   cd "$REPO" || exit 2
 fi
@@ -103,7 +121,7 @@ purge() { find src tests -name __pycache__ -type d -exec rm -rf {} + 2>/dev/null
 # systemd-analyze the baseline below goes red and says so, which is correct: this
 # is a release gate, not a contributor's first run.
 run()   { PORTER_REQUIRE_UV=1 PORTER_REQUIRE_DOCKER=1 PORTER_REQUIRE_SYSTEMD=1 \
-            uv run --extra dev pytest -q "$@" >/tmp/rv.log 2>&1; echo $?; }
+            uv run --extra dev pytest -q "$@" >"$RVLOG" 2>&1; echo $?; }
 
 fail=0
 
@@ -113,7 +131,7 @@ fail=0
 # cannot disagree about where an entry's quoting ends. It does two jobs:
 # `--check-patterns` (apply every mutation in memory, report the dead ones) and
 # the shard assignment.
-MAPFILE=$(mktemp)
+MAPFILE="$RVDIR/entries.map"
 PORTER_SELF="$SELF" PORTER_N="$SHARD_N" PORTER_PATTERNS="$PATTERNS_ONLY" \
 python3 - "$MAPFILE" <<'PY'
 import os, sys, shlex, difflib, pathlib
@@ -262,7 +280,7 @@ baseline_scope() {
   SCOPE_BASELINED[$scope]=1
   if [ "$rc" -ne 0 ]; then
     echo "  ABORT: $scope is not green before mutating (rc=$rc)"
-    sed 's/^/    | /' /tmp/rv.log | tail -25
+    sed 's/^/    | /' "$RVLOG" | tail -25
     exit 2
   fi
   echo "  baseline $scope rc=0"
@@ -279,16 +297,16 @@ check() {  # check <label> <file> <expr> <scope> [max-changed-lines, default 2]
 "bash disagree about this file"; exit 2; }
   [ "${ENTRY_SHARD[$IDX]}" -eq "$((SHARD_I - 1))" ] || return 0
   baseline_scope "$scope"
-  cp "$file" /tmp/rv.keep
+  cp "$file" "$RVKEEP"
   uv run python - "$file" <<PY
 import sys, pathlib
 p = pathlib.Path(sys.argv[1]); s = p.read_text()
 $expr
 p.write_text(s)
 PY
-  if cmp -s "$file" /tmp/rv.keep; then
+  if cmp -s "$file" "$RVKEEP"; then
     echo "  SKIP  $label — pattern did not match; the file is unchanged"
-    cp /tmp/rv.keep "$file"; purge; fail=1; return
+    cp "$RVKEEP" "$file"; purge; fail=1; return
   fi
   # Trap 6: `s.replace(old, new)` is a SUBSTRING match with no occurrence limit.
   # A Task 4 entry drifted onto Task 11's .timer branch and made this gate report
@@ -297,14 +315,14 @@ PY
   # to disable ONE guard: if it rewrote several places, the verdict below is
   # about something other than the guard named.
   local changed
-  changed=$(diff /tmp/rv.keep "$file" | grep -c '^[<>]' || true)
+  changed=$(diff "$RVKEEP" "$file" | grep -c '^[<>]' || true)
   if [ "${changed:-0}" -gt "$maxlines" ]; then
     echo "  SKIP  $label — mutation rewrote $changed lines, allowance $maxlines. Narrow the pattern, or raise the allowance if it is deliberate."
-    cp /tmp/rv.keep "$file"; purge; fail=1; return
+    cp "$RVKEEP" "$file"; purge; fail=1; return
   fi
   purge
   local rc; rc=$(run "$scope")
-  cp /tmp/rv.keep "$file"; purge
+  cp "$RVKEEP" "$file"; purge
   if [ "$rc" -ne 0 ]; then echo "  PASS  $label — guard removed => suite red (rc=$rc)"
   else echo "  FAIL  $label — guard removed and suite STAYED GREEN"; fail=1; fi
 }
@@ -1646,7 +1664,7 @@ else
       echo "  restored $scope rc=0"
     else
       echo "  FAIL — harness left dirty: $scope rc=$final"
-      sed 's/^/    | /' /tmp/rv.log | tail -25
+      sed 's/^/    | /' "$RVLOG" | tail -25
       fail=1
     fi
   done
