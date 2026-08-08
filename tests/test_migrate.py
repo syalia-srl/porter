@@ -18,9 +18,10 @@ from pathlib import Path
 import pytest
 import yaml
 
+from porter.assemble import assemble
 from porter.config import env_postinst, setup_script
 from porter.migrate import Migration, migration_postinst
-from porter.types import Component
+from porter.types import Component, Python
 
 EXAMPLE = Path(__file__).resolve().parents[1] / "examples" / "stateful-service"
 
@@ -229,6 +230,19 @@ def test_the_postinst_points_at_the_wizard_only_when_one_is_shipped():
     """
     assert "stateful-demo-setup" in env_postinst("stateful-demo", has_setup=True)
     assert "-setup" not in env_postinst("stateful-demo")
+
+
+def test_a_command_declaring_migrations_is_refused(tmp_path):
+    """The command branch of `assemble` emits no postinst at all.
+
+    So dpkg would have nothing to call the migration from: the manifest declares
+    one, the package upgrades at rc=0, and nothing is migrated or said. Refused
+    before the interpreter is vendored, like every other refusal there.
+    """
+    component = replace(_example_component(), kind="command", bin_name="demo",
+                        defaults={}, admin_keys=[])
+    with pytest.raises(ValueError, match="may not declare migrations"):
+        assemble(component, Python(), EXAMPLE, tmp_path / "stage")
 
 
 def test_both_example_manifests_parse_and_differ_only_where_the_upgrade_does():
