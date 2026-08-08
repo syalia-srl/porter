@@ -493,11 +493,79 @@ check "T11 a oneshot with no schedule is refused" src/porter/systemd.py \
 # the manifest ships.
 check "T11 a schedule systemd cannot parse is refused" src/porter/systemd.py \
   's = s.replace("    if probe.returncode != 0:", "    if False:")' tests/test_oneshot.py
-# Removed, a `service` that declares `schedule:` has it silently dropped: only
-# the oneshot branch writes a timer, so the package runs continuously and the
-# manifest goes on claiming a calendar.
-check "T11 a service declaring a schedule is refused" src/porter/assemble.py \
-  's = s.replace("    if component.kind == \"service\" and component.schedule:", "    if False:")' \
+# Removed, a kind that emits no timer has its `schedule:` silently dropped: only
+# the oneshot branch writes one, so a `service` runs continuously and a
+# `command` does not run at all, while the manifest goes on claiming a calendar.
+# The `command` half was ACCEPTED until the Task 11 review found it; the
+# predicate reads `!= "oneshot"` now and covers both, which is why this entry's
+# pattern changed with it -- a stale pattern SKIPs, and a SKIP scores as a
+# failure that looks nothing like the quoting bug it usually is.
+check "T11 a kind that emits no timer may not declare a schedule" src/porter/assemble.py \
+  's = s.replace("    if component.kind != \"oneshot\" and component.schedule:", "    if False:")' \
+  tests/test_oneshot.py
+
+echo "════ Task 9-11 review — the fix round ════"
+# THE finding of the review: `enable` LINKS a unit and starts nothing, and
+# `try-restart` is a no-op on one that is not running -- which is the fresh
+# install. So `dpkg -i` of a nightly job left the timer enabled, the package
+# `install ok installed`, and NOTHING counting down until the next reboot.
+#
+# Scoped to tests/test_config.py and not to the nspawn test on purpose. `run()`
+# above does not arm PORTER_REQUIRE_NSPAWN (consistent with ci.yml), so
+# tests/test_oneshot.py's booted assertion would SKIP on a CI runner and this
+# entry would report FAIL on healthy code. The container test is what proves it
+# on a real client; this is what keeps the gate honest without one.
+check "REV a fresh install arms the unit (enable starts nothing)" src/porter/config.py \
+  's = s.replace("    if [ -z \"$2\" ]; then\n      {arm}\n    fi\n", "")' \
+  tests/test_config.py 4
+# Which unit gets armed is the component's kind, and assemble is the only thing
+# that knows it. Mutated to a fixed "service", a job's postinst starts
+# demo-job.SERVICE: the job runs once at install time, at whatever hour the
+# operator was there, and the timer is still not counting down.
+check "REV assemble tells the postinst which unit to arm" src/porter/assemble.py \
+  's = s.replace("has_setup=bool(component.admin_keys), kind=component.kind)", "has_setup=bool(component.admin_keys))")' \
+  tests/test_oneshot.py
+# A migration runs as root; the service does not. `tmp.replace(state_path)` hands
+# the client's state file to root:root and the static system user of rule 8 can
+# no longer write it -- upgrade at rc=0, `install ok installed`, service broken
+# on next start. Removed, the e2e reads STATE=root:root and WRITE_RC=2.
+check "REV a migration leaves client state owned by the service user" \
+  src/porter/migrate.py \
+  's = s.replace("    if [ -d /var/lib/{pkg} ]; then\n      chown -R {pkg}:{pkg} /var/lib/{pkg}\n    fi\n", "")' \
+  tests/test_migrate_e2e.py 4
+# Nothing ran `sh -n` on anything until this. `migrations: script:` is spliced
+# into the postinst verbatim, so one missing quote in porter.yaml built a .deb
+# at rc=0 (measured: 20,672 bytes, dpkg-deb --info shows the unparseable
+# postinst) that dies on the client. Covers /usr/bin/<pkg>-setup by the same
+# branch -- porter writes every file it puts there.
+check "REV every generated shell script must parse (sh -n)" src/porter/deb.py \
+  's = s.replace("        if probe.returncode != 0:", "        if False:")' \
+  tests/test_deb.py
+# `sh -n` cannot see this one: `MY-KEY_value=$new` PARSES (rc=0, measured) and
+# is a command named MY-KEY_value, which fails at run time on the client with
+# rc=127. `A.B` also reaches `grep -vE '^(A.B)='`, where the dot matches any
+# character and the wizard drops lines of the admin's file nobody named.
+check "REV an admin_key that is not a shell identifier is refused" \
+  src/porter/assemble.py \
+  's = s.replace("        if not SHELL_IDENTIFIER.match(key):", "        if False:")' \
+  tests/test_migrate.py
+# assemble stages data: into /usr/share/<pkg>/ and THEN writes VERSION and
+# env.example there. Removed, a corpus named VERSION is staged and silently
+# replaced by the provenance stamp: rc=0, the path is still in --contents, the
+# bytes are porter's.
+check "REV a data: entry may not collide with a file porter writes" \
+  src/porter/assemble.py \
+  's = s.replace("        if Path(entry).name in RESERVED_SHARE_NAMES:", "        if False:")' \
+  tests/test_bake.py
+# TRAP 4 APPLIES. `timer()` refuses this too, so removing this branch does not
+# let a scheduleless job ship -- what it loses is WHERE the refusal happens.
+# assemble reaches timer() after vendor() has materialised ~97 MB and after
+# <pkg>.service is on disk, so the test's own name ("before anything is staged")
+# was false until this existed. It registers because that test now asserts the
+# stage does not exist.
+check "REV a oneshot with no schedule is refused BEFORE staging (TIMING -- see Trap 4)" \
+  src/porter/assemble.py \
+  's = s.replace("    if component.kind == \"oneshot\" and not component.schedule:", "    if False:")' \
   tests/test_oneshot.py
 echo
 echo "════ control: suite green again after every restore ════"
