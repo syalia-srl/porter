@@ -37,6 +37,7 @@ from __future__ import annotations
 
 import ast
 import os
+import re
 import shlex
 import shutil
 import subprocess
@@ -62,6 +63,17 @@ SUPPORTED_KINDS = ("service", "command", "oneshot")
 
 # The kinds that get a systemd unit rather than a /usr/bin wrapper.
 UNIT_KINDS = ("service", "oneshot")
+
+# Basenames `assemble` itself writes into /usr/share/<pkg>/. A `data:` entry
+# with one of these names would be staged first and then overwritten, at rc=0,
+# with the manifest still claiming it shipped.
+RESERVED_SHARE_NAMES = ("VERSION", "env.example")
+
+# What `admin_keys` may be spelled as. `setup_script` interpolates each key into
+# a shell IDENTIFIER (`{key}_value=$new`) and into an ERE alternation
+# (`grep -vE '^({managed})='`), and `split()` writes it as `KEY=value` into a
+# file systemd parses as an environment file. All three want the same shape.
+SHELL_IDENTIFIER = re.compile(r"[A-Za-z_][A-Za-z0-9_]*\Z")
 
 
 @dataclass
@@ -105,11 +117,37 @@ def _refuse_what_porter_cannot_emit(component: Component, python: Python) -> Non
       systemd has nothing to order, so the declaration would be read, accepted
       and dropped. porter's characteristic bug is the silently ignored input,
       not the loud one.
-    - **A `service` declaring `schedule:`.** The schedule reaches a `.timer`
-      that only the oneshot branch writes, so a service that declares one gets
-      a package that runs continuously and never on the calendar its author
-      asked for -- at rc=0, with the manifest saying otherwise.
+    - **A `service` or a `command` declaring `schedule:`.** The schedule reaches
+      a `.timer` that only the oneshot branch writes, so a service that declares
+      one gets a package that runs continuously and never on the calendar its
+      author asked for -- at rc=0, with the manifest saying otherwise. A
+      `command` is worse still: it emits no unit at all, so the schedule is read
+      and dropped with nothing anywhere to notice.
+    - **A `oneshot` declaring no `schedule:`.** Refused *here*, and not only in
+      `timer()`, so that the refusal really does land before anything is staged
+      -- `assemble` reaches `timer()` after `vendor()` has materialised ~97 MB
+      and after `<pkg>.service` has been written. The sibling refusal above has
+      always been here; this one was not, and a test claiming it was is the
+      thing that gets believed.
+    - **An `admin_keys` entry that is not a shell identifier.** `MY-KEY` is
+      spliced into `<pkg>-setup` as `MY-KEY_value=$new`, which PARSES -- it is a
+      command named `MY-KEY_value` -- and fails at run time on the client, and
+      into `grep -vE '^(MY-KEY)='`, where a key like `A.B` silently matches
+      lines it was never meant to drop. `sh -n` in deb.py cannot see either.
+    - **A `data:` entry named `VERSION` or `env.example`.** Both are written by
+      `assemble` into the same `/usr/share/<pkg>/`, after the data is staged, so
+      the adopter's file is overwritten at rc=0 with the manifest still listing
+      it.
     """
+    for entry in component.data_paths:
+        if Path(entry).name in RESERVED_SHARE_NAMES:
+            raise ValueError(
+                f"data entry {entry!r} would be staged as /usr/share/{component.package}"
+                f"/{Path(entry).name}, which porter writes itself "
+                f"({', '.join(RESERVED_SHARE_NAMES)} are the provenance stamp and "
+                "the admin env template). It would be overwritten and the package "
+                "would ship porter's file under the manifest's name -- rename it"
+            )
     if component.kind not in SUPPORTED_KINDS:
         raise ValueError(
             f"unknown component kind {component.kind!r}: porter emits "
@@ -123,13 +161,28 @@ def _refuse_what_porter_cannot_emit(component: Component, python: Python) -> Non
             "is. An interpreter shipped in a package of its own has no known "
             "install path here, so ExecStart would be a guess"
         )
-    if component.kind == "service" and component.schedule:
+    if component.kind != "oneshot" and component.schedule:
         raise ValueError(
-            f"component {component.name!r} is kind 'service' and declares "
+            f"component {component.name!r} is kind {component.kind!r} and declares "
             f"schedule: {component.schedule!r}. Only 'oneshot' emits a .timer, so "
-            "the schedule would be silently dropped and the service would run "
-            "continuously instead. Use kind: oneshot"
+            "the schedule would be silently dropped -- a service would run "
+            "continuously and a command would not run at all. Use kind: oneshot"
         )
+    if component.kind == "oneshot" and not component.schedule:
+        raise ValueError(
+            f"component {component.name!r} is kind 'oneshot' and declares no "
+            "schedule: a timer with no OnCalendar= is a unit that loads, enables "
+            "and never fires. Add `schedule:` to the manifest"
+        )
+    for key in component.admin_keys:
+        if not SHELL_IDENTIFIER.match(key):
+            raise ValueError(
+                f"admin_keys entry {key!r} is not a shell identifier "
+                f"([A-Za-z_][A-Za-z0-9_]*). {component.package}-setup writes it as "
+                f"`{key}_value=$new`, which sh PARSES as a command and fails only "
+                "on the client, and greps it as `^(...)=`, where a '.' or a '|' "
+                "matches keys nobody named. Rename the key"
+            )
     if component.kind == "command":
         if not component.bin_name:
             raise ValueError("a 'command' component needs bin_name: there is no name "
@@ -493,9 +546,12 @@ def assemble(component: Component, python: Python,
         # the client through here and nowhere else: a manifest that declares one
         # and an emitter that drops it is an upgrade that silently does not
         # migrate, which is the whole failure this task exists to close.
+        # `kind=` decides which unit the postinst starts on a fresh install, and
+        # for a oneshot that is the .timer -- starting its .service would run the
+        # job at install time, which is not what a schedule means.
         scripts["postinst"] = env_postinst(
             pkg, migrations=component.migrations,
-            has_setup=bool(component.admin_keys))
+            has_setup=bool(component.admin_keys), kind=component.kind)
     else:  # command -- no unit, no user, no config; see the refusal above
         bindir = stage / "usr/bin"
         bindir.mkdir(parents=True)

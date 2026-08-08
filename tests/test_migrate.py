@@ -18,7 +18,7 @@ from pathlib import Path
 import pytest
 import yaml
 
-from porter.assemble import assemble
+from porter.assemble import SHELL_IDENTIFIER, assemble
 from porter.config import env_postinst, setup_script
 from porter.migrate import Migration, migration_postinst
 from porter.types import Component, Python
@@ -230,6 +230,38 @@ def test_the_postinst_points_at_the_wizard_only_when_one_is_shipped():
     """
     assert "stateful-demo-setup" in env_postinst("stateful-demo", has_setup=True)
     assert "-setup" not in env_postinst("stateful-demo")
+
+
+@pytest.mark.parametrize("key", ["MY-KEY", "A.B", "2FA_TOKEN", "DB HOST", ""])
+def test_an_admin_key_that_is_not_a_shell_identifier_is_refused(tmp_path, key):
+    """`sh -n` cannot catch this one, which is why it is a separate refusal.
+
+    `<pkg>-setup` writes `{key}_value=$new`. With `MY-KEY` that is not an
+    assignment at all -- it is a COMMAND named `MY-KEY_value`, which parses
+    perfectly, so the package builds, lints, installs and ships the wizard. The
+    operator finds out when they run it, at commissioning time, on a client with
+    no network. `A.B` is worse still: it also reaches
+    `grep -vE '^(A.B)='`, where the dot matches any character and the wizard
+    quietly drops lines of the admin's file it was never asked about.
+
+    Refused in `assemble`, before anything is staged, and the message names the
+    key -- there is no other way for the adopter to know which of six it was.
+    """
+    component = replace(_example_component(), admin_keys=[key])
+    with pytest.raises(ValueError, match="not a shell identifier"):
+        assemble(component, Python(), EXAMPLE, tmp_path / "stage")
+    assert not (tmp_path / "stage").exists(), (
+        "the refusal fired after the stage was created")
+
+
+def test_the_gallery_entrys_own_admin_keys_pass_that_check(tmp_path):
+    """The positive control for the refusal above: a check that refused every
+    key would satisfy it just as well, and `examples/stateful-service` is what
+    an adopter copies."""
+    component = _example_component()
+    assert component.admin_keys, "the example stopped declaring admin keys"
+    for key in component.admin_keys:
+        assert SHELL_IDENTIFIER.match(key), key
 
 
 def test_a_command_declaring_migrations_is_refused(tmp_path):

@@ -32,8 +32,9 @@ import pytest
 import yaml
 from conftest import _require_uv
 
+from porter.assemble import assemble
 from porter.bake import bake
-from porter.types import BakeArtifact, Component
+from porter.types import BakeArtifact, Component, Python
 
 EXAMPLE = Path(__file__).resolve().parents[1] / "examples" / "baked-data"
 
@@ -451,6 +452,26 @@ def test_the_example_manifest_declares_the_bake_the_code_reads(tmp_path):
     assert component.data_paths == ["data/corpus.db"]
     assert "data/corpus.db" not in component.source_paths, (
         "baked data belongs in /usr/share/<pkg>, not in the import root")
+
+
+@pytest.mark.parametrize("name", ["VERSION", "env.example"])
+def test_a_data_entry_that_would_collide_with_a_file_porter_writes_is_refused(
+        tmp_path, name):
+    """`assemble` stages `data:` into /usr/share/<pkg>/ and then writes VERSION
+    and env.example into the same directory, each unconditionally.
+
+    So a corpus called `VERSION` was staged and then silently replaced by the
+    provenance stamp: the .deb builds at rc=0, the manifest still lists the
+    entry, `dpkg-deb --contents` still shows the path, and the bytes are
+    porter's. Narrow, and exactly the shape this repo refuses -- a wrong
+    artefact reported as a right one.
+
+    Refused before anything is staged, and the message names the entry.
+    """
+    component = _component(data_paths=[f"data/{name}"])
+    with pytest.raises(ValueError, match=name.replace(".", r"\.")):
+        assemble(component, Python(), tmp_path, tmp_path / "stage")
+    assert not (tmp_path / "stage").exists()
 
 
 @pytest.fixture(scope="session")

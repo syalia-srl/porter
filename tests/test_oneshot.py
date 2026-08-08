@@ -178,18 +178,40 @@ def test_assemble_stages_both_units_for_a_oneshot(tmp_path, src_tree):
 
 def test_a_oneshot_with_no_schedule_is_refused_before_anything_is_staged(
         tmp_path, src_tree):
+    """And the second half of that name is now checked, and is now true.
+
+    It was neither. The refusal lived only in `timer()`, which `assemble`
+    reaches *after* `vendor()` has materialised ~97 MB and after
+    `<pkg>.service` has been written -- so the stage did exist, and the test
+    asserting it did not was asserting nothing. The refusal is in
+    `_refuse_what_porter_cannot_emit` now, beside its sibling, and `timer()`
+    keeps its own for callers that reach it directly.
+    """
+    stage = tmp_path / "stage"
     with pytest.raises(ValueError, match="never fires"):
         assemble(_job(schedule=None, module="hello", source_paths=["src/hello.py"]),
-                 PY, src_tree, tmp_path / "stage")
+                 PY, src_tree, stage)
+    assert not stage.exists(), (
+        f"the refusal fired after staging began; {stage} holds "
+        f"{sorted(p.name for p in stage.iterdir())}")
 
 
-def test_a_service_declaring_a_schedule_is_refused(tmp_path, src_tree):
-    """Only the oneshot branch writes a `.timer`, so a service that declares a
-    schedule gets a package that runs continuously and never on the calendar its
-    author asked for -- at rc=0, with the manifest saying otherwise."""
+@pytest.mark.parametrize("kind,extra", [("service", {}),
+                                        ("command", {"bin_name": "demo"})])
+def test_a_kind_that_emits_no_timer_may_not_declare_a_schedule(
+        tmp_path, src_tree, kind, extra):
+    """Only the oneshot branch writes a `.timer`.
+
+    A `service` that declares a schedule gets a package that runs continuously
+    and never on the calendar its author asked for. A `command` gets less than
+    that: it emits no unit at all, so the schedule is read, dropped, and nothing
+    anywhere is different -- at rc=0, with the manifest saying otherwise. The
+    second case was accepted until the Task 11 review found it, while its
+    sibling had been refused since the kind existed.
+    """
     with pytest.raises(ValueError, match="oneshot"):
-        assemble(_job(kind="service", module="hello",
-                      source_paths=["src/hello.py"]),
+        assemble(_job(kind=kind, module="hello",
+                      source_paths=["src/hello.py"], **extra),
                  PY, src_tree, tmp_path / "stage")
 
 
@@ -325,6 +347,14 @@ def test_the_same_procedure_enables_a_service_at_boot(tmp_path, require_uv,
 # run under the unit porter emitted. `systemctl start <pkg>.service` on a
 # Type=oneshot BLOCKS until the process exits, so its rc is the job's own -- on
 # Type=simple it would return the moment the fork succeeded and tell us nothing.
+#
+# NOTHING HERE STARTS THE TIMER. The first version of this probe ran
+# `systemctl start demo-job.timer` between the install and the questions, which
+# made every assertion below about a timer the TEST had armed -- so the probe
+# was structurally unable to notice that `dpkg -i` alone armed nothing, which
+# for four commits it did not (`enable` links a unit; `try-restart` is a no-op
+# on one that is not running). The line is gone, and `is-active` below is what
+# it bought. See porter/config.py's fresh-install block.
 JOB_PROBE_SH = '''\
 #!/bin/sh
 exec >/out/probe.log 2>&1
@@ -332,9 +362,13 @@ set -x
 dpkg -i /debs/*.deb; echo "DPKG_RC=$?" > /out/dpkg-rc
 systemctl is-enabled demo-job.timer > /out/timer-enabled 2>&1
 systemctl is-enabled demo-job.service > /out/service-enabled 2>&1
-systemctl start demo-job.timer
+# After the install and NOTHING ELSE. `enabled` means the symlink exists and
+# says nothing about whether systemd is counting down; `active` on a .timer is
+# what "armed" means.
+systemctl is-active demo-job.timer > /out/timer-active 2>&1
 # The next time systemd intends to fire the job. Empty means the calendar was
-# never understood -- which is exactly what a shipped typo looks like.
+# never understood -- which is exactly what a shipped typo looks like -- and, on
+# a timer nobody started, it is also what an unarmed timer looks like.
 systemctl show -p NextElapseUSecRealtime --value demo-job.timer > /out/next-elapse
 systemctl start demo-job.service; echo "RUN_RC=$?" > /out/run-rc
 systemctl show -p Result --value demo-job.service > /out/result
@@ -364,6 +398,14 @@ def test_the_job_runs_under_systemd_and_writes_to_its_state_directory(
     four things that have to work together for `kind: oneshot` to mean anything,
     and the last two of which involve `ProtectSystem=strict` and a static system
     user that only a real boot exercises.
+
+    **And the arming is the package's, not the test's.** This probe used to run
+    `systemctl start demo-job.timer` by hand, so `is-enabled` and
+    `NextElapseUSecRealtime` were both being read off a timer it had started
+    itself: the test could not fail on a package that installed a job and left
+    it inert until the next reboot, which is exactly what porter shipped. The
+    probe starts nothing now. `dpkg -i` is the only thing that happens between
+    the boot and the questions.
     """
     out = tmp_path / "out"
     booted = nspawn.boot_with_probe(nspawn_root, JOB_PROBE_SH, out,
@@ -379,12 +421,21 @@ def test_the_job_runs_under_systemd_and_writes_to_its_state_directory(
     # here by the systemd that actually did the enabling during postinst.
     assert (out / "timer-enabled").read_text().strip() == "enabled", context
     assert (out / "service-enabled").read_text().strip() == "indirect", context
+    # THE fresh-install claim, and the only test in porter that makes it: after
+    # `dpkg -i` and nothing else, is the unit running? `enabled` above is a
+    # symlink in timers.target.wants and is true of a timer that will not fire
+    # until the next boot -- which is what a client installing a nightly job at
+    # 10:00 got, at rc=0, with dpkg reporting `install ok installed`.
+    assert (out / "timer-active").read_text().strip() == "active", (
+        f"the timer is enabled but not running after dpkg -i: the job does not "
+        f"exist until this machine is rebooted\n{context}")
     # A next elapse means systemd parsed `OnCalendar=*-*-* 03:00:00` and intends
     # to act on it. A timer with an expression it could not read is still
-    # "enabled" and has none.
+    # "enabled" and has none -- and so is one nobody started.
     assert (out / "next-elapse").read_text().strip() not in ("", "0", "n/a"), (
         f"the timer is enabled but systemd has no next elapse for it: the "
-        f"calendar expression did not survive into a schedule\n{context}")
+        f"calendar expression did not survive into a schedule, or nothing armed "
+        f"the timer\n{context}")
 
     # The job ran to completion. `Result=success` is systemd's own verdict on a
     # Type=oneshot, which it can only have because it waited for the process.
@@ -400,6 +451,27 @@ def test_the_job_runs_under_systemd_and_writes_to_its_state_directory(
     # EnvironmentFile, so this line also proves the config split reaches the
     # running process and not merely the disk.
     assert "demo-job" in (out / "state-dir").read_text(), context
+
+
+def test_the_shipped_postinst_arms_the_timer_and_not_the_job(built_job):
+    """Read out of the built .deb, because that is what a client runs.
+
+    Two units are in play and the postinst has to name the right one: it
+    ENABLES `demo-job.service` (whose `[Install] Also=` carries the timer) and
+    STARTS `demo-job.timer`. Starting the service instead would run the job at
+    install time -- once, at whatever hour the operator happened to be there --
+    and still leave nothing counting down to 03:00.
+
+    This is the non-nspawn half of the claim `test_the_job_runs_under_systemd_`
+    makes on a booted container, and it exists so that a CI run without
+    PORTER_REQUIRE_NSPAWN still fails if `assemble` stops telling the postinst
+    what kind of component it is staging.
+    """
+    script = "\n".join(line for line in _postinst(built_job).splitlines()
+                       if not line.lstrip().startswith("#"))
+    assert re.findall(r"systemctl start (?:--no-block )?(\S+)", script) == [
+        "demo-job.timer"], script
+    assert re.findall(r"systemctl enable (\S+)", script) == ["demo-job.service"], script
 
 
 def test_the_oneshot_examples_config_split_is_intact(built_job, tmp_path):

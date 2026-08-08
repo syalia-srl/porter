@@ -420,10 +420,12 @@ PROBE_SH = '''\
 exec >/out/probe.log 2>&1
 set -x
 dpkg -i /debs/*.deb; echo "DPKG_RC=$?" > /out/dpkg-rc
-# Starting the dependent is what a `Requires=` is for: systemd pulls in the
-# dependency, orders the two, and the dependency fails. Everything after this
-# line is systemd's behaviour, not the test's.
-systemctl start --no-block porter-dependent.service
+# NOTHING STARTS ANYTHING HERE. This used to run
+# `systemctl start --no-block porter-dependent.service`, which meant the
+# convergence below was the test's doing and the probe could not tell an
+# installed suite from an inert one. The postinst arms a fresh install now
+# (porter/config.py), so `dpkg -i` is the whole of the operator's work and
+# everything after this line is systemd's behaviour.
 # Waits for the DEPENDENT'S OWN MARKER, not for `is-active`. On Type=simple
 # systemd reports a unit active as soon as it has forked, so both units read
 # `active` while the dependency's process was already exiting -- measured here,
@@ -491,7 +493,8 @@ def test_the_dependent_converges_though_its_dependency_fails_its_first_starts(
     that the system *converges*: a dependency that is not ready yet costs the
     dependent a few restarts, not a failed boot. That argument had never been
     executed. Measured here, in a booted container, with the dependency exiting
-    non-zero on its first two starts.
+    non-zero on its first two starts -- and with `dpkg -i` as the only thing the
+    operator does, since the probe no longer starts anything itself.
 
     Four assertions, and the middle two are controls -- both of which have
     already fired. The first version of this test waited for
