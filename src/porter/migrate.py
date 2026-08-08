@@ -109,5 +109,21 @@ def migration_postinst(pkg: str, migrations: Sequence[Migration]) -> str:
   # it EMPTY on a fresh install, and that is the whole discrimination: a
   # migration that fires here runs against state that does not exist yet.
   if [ -n "$2" ]; then
-{body}  fi
+{body}    # A migration runs as ROOT, because a postinst does. The gallery's own
+    # migration rewrites the state file the safe way -- write a temp file beside
+    # it, rename it over the original -- and `rename` hands the result to
+    # root:root, away from the static system user the unit's `User=` names. So
+    # the upgrade succeeds, dpkg reports `install ok installed`, and the client
+    # is left with state its own service cannot write. Anything else a migration
+    # created (the log beside the state file) is root-owned for the same reason.
+    #
+    # Restored by porter rather than left to the migration author: porter creates
+    # the user above, porter emits the unit that names it, and an ownership
+    # contract every adopter has to remember is one most of them will not. The
+    # e2e cannot see this by running ExecStart as root, which is why it now runs
+    # it as {pkg}.
+    if [ -d /var/lib/{pkg} ]; then
+      chown -R {pkg}:{pkg} /var/lib/{pkg}
+    fi
+  fi
 '''

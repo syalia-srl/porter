@@ -214,6 +214,82 @@ def test_an_upgrade_migrates_once_and_the_clients_own_data_survives(
         f"proves nothing about the migration having run:\n{out}")
 
 
+def test_the_migration_leaves_the_clients_state_owned_by_the_service_user(
+        docker_image, mounts):
+    """A migration runs as root, and the service does not.
+
+    Every other test in this file runs `ExecStart` by `eval` **as root**, which
+    is what made this invisible: `migrate_v2` writes `state.json.migrating` and
+    renames it over the original, so the client's state came out `root:root` --
+    away from the static system user the unit's `User=` names (rule 8) -- and
+    `migrations.log` was created root-owned beside it. The upgrade exits 0, dpkg
+    reports `install ok installed`, and on the next start the service cannot
+    write its own state. porter had no ownership contract for migrations at all,
+    and `examples/stateful-service` is the template adopters copy.
+
+    A container has no systemd, so `StateDirectory=` is reproduced by hand with
+    `install -d -o <pkg>`: that is precisely what systemd does before ExecStart,
+    and without it the payload would create the directory as whoever ran it.
+
+    Two `stat`s and a control. The ownership before the upgrade proves the
+    fixture really is the situation being described; the ownership after is the
+    claim. The control is the last block, and it is what makes the claim mean
+    something to a client: it opens **the state file itself** for writing as the
+    package's user. A `stat` alone reports a fact about an inode; this reports
+    the operation the service performs on every start, and it is the operation
+    that fails -- the directory stays writable either way, because the migration
+    never replaced the *directory*.
+
+    Deliberately no second run of the payload. `kill $!` reaches the subshell
+    and not the interpreter `runuser` spawned under it, so a lingering 1.9 still
+    holding :9010 would answer a curl with the migrated state and the assertion
+    would pass on the wrong process. The write is the sharper question anyway.
+    """
+    script = (
+        "set -e; dpkg -i /v1/*.deb >/dev/null; "
+        # What StateDirectory= does before ExecStart, done by hand: there is no
+        # systemd in a container, and without this the payload would create the
+        # directory as whoever ran it.
+        f"install -d -o {PKG} -g {PKG} -m 750 /var/lib/{PKG}; "
+        f"printf 'hola\\n' | {PKG}-setup >/dev/null; "
+        + READ_UNIT +
+        # 1.9, run as the package's own user -- which is the whole point.
+        f'( cd "$WD" && runuser -u {PKG} -- sh -c "$ES" ) & V1=$!; sleep 3; '
+        "kill $V1 2>/dev/null || true; "
+        f"echo '--- before'; stat -c 'STATE=%U:%G' {STATE}; "
+        "dpkg -i /v2/*.deb >/dev/null; "
+        f"echo '--- after'; stat -c 'STATE=%U:%G' {STATE}; "
+        f"stat -c 'LOG=%U:%G' {LOG}; stat -c 'DIR=%U:%G' /var/lib/{PKG}; "
+        "echo '--- writable'; set +e; "
+        # Opened for append, so nothing is destroyed if it succeeds and the
+        # question asked is exactly the service's: may this user write THIS file.
+        f"runuser -u {PKG} -- sh -c ': >> {STATE}'; echo \"WRITE_RC=$?\"; "
+        f"echo '--- content'; cat {STATE}"
+    )
+    proc = _run(docker_image, script, mounts)
+    out = proc.stdout + proc.stderr
+    assert proc.returncode == 0, out
+
+    assert "STATE=stateful-demo:stateful-demo" in _section(proc.stdout, "before"), (
+        "1.9 did not leave the state file owned by the service user, so the "
+        f"upgrade below is not the transition this test is about:\n{out}")
+
+    after = _section(proc.stdout, "after")
+    assert "STATE=stateful-demo:stateful-demo" in after, (
+        "the migration ran as root and handed the client's state file to root: "
+        "the upgrade exits 0 and the service can no longer write its own "
+        f"state\n{out}")
+    assert "LOG=stateful-demo:stateful-demo" in after, (
+        f"migrations.log was left root-owned beside the state file:\n{out}")
+
+    assert "WRITE_RC=0" in _section(proc.stdout, "writable"), (
+        f"the service user cannot open its own state file for writing:\n{out}")
+    # And the migration still did its job -- an ownership fix that also emptied
+    # the file would satisfy everything above.
+    assert json.loads(_section(proc.stdout, "content")) == {
+        "schema": 2, "notes": [{"text": "hola"}]}, out
+
+
 def test_a_failing_migration_leaves_the_package_unconfigured(docker_image, mounts):
     """Half-migrated and reported healthy is the outcome this refuses.
 
