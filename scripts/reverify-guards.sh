@@ -117,7 +117,7 @@ check "T3 a failed systemctl enable on a booted host is fatal" src/porter/config
   's = s.replace("systemctl enable {pkg}.service", "systemctl enable {pkg}.service || true")' \
   tests/test_service_e2e.py
 check "T3 a host with no booted systemd skips systemctl entirely" src/porter/config.py \
-  's = s.replace("if [ -d /run/systemd/system ]", "if [ -d / ]")' tests/test_service_e2e.py
+  's = s.replace("if [ -d /run/systemd/system ]", "if [ -d / ]")' tests/test_service_e2e.py 6
 # Presence of the hardening directives, which systemd-analyze cannot see: it
 # reports keys it does not recognise, never keys that are absent.
 check "T3 the unit carries its hardening directives" src/porter/systemd.py \
@@ -226,7 +226,7 @@ echo "════ Task 4 fix 1 — the porter.spec seam ════"
 # only thing anywhere that notices.
 check "T4 porter.spec re-exports porter.types, never redefines it" src/porter/spec.py \
   's = s.replace("from porter.types import BakeArtifact, Component, Python", "class BakeArtifact: pass\nclass Component: pass\nclass Python: pass")' \
-  tests/test_types.py
+  tests/test_types.py 6
 
 echo "════ Task 9 ════"
 # Task 9 -- bake. Entries for scripts/reverify-guards.sh; the controller merges
