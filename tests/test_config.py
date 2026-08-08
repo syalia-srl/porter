@@ -1,3 +1,8 @@
+import shutil
+import subprocess
+
+import pytest
+
 from porter.config import split, env_postinst
 from porter.systemd import unit
 
@@ -49,6 +54,41 @@ def test_postinst_creates_the_system_user_and_restarts_on_upgrade():
     body = env_postinst("porter-example-service")
     assert "useradd --system" in body
     assert "try-restart" in body
+
+
+def _verify(tmp_path, body: str) -> str:
+    """`systemd-analyze verify` on a unit file, output read as the result.
+
+    Not the rc: it is 1 whenever ExecStart names a binary the build host does
+    not have, which for a real porter unit is always -- the interpreter lives
+    at its CLIENT path. So these tests verify the unit's *shape* with a stand-in
+    ExecStart, and the real one is exercised in the container e2e.
+    """
+    path = tmp_path / "porter-example-service.service"
+    path.write_text(body)
+    proc = subprocess.run(["systemd-analyze", "verify", str(path)],
+                          capture_output=True, text=True, cwd=tmp_path)
+    return proc.stdout + proc.stderr
+
+
+@pytest.mark.skipif(not shutil.which("systemd-analyze"), reason="systemd-analyze not installed")
+def test_the_emitted_unit_parses_with_no_directive_systemd_would_ignore(tmp_path):
+    """A misspelled directive is not an error to systemd -- it logs "Unknown
+    key ... ignoring" and starts the service anyway. So `EnviromentFile` would
+    hand the service an environment with none of its config in it, at rc=0,
+    and only a runtime KeyError downstream would say so.
+
+    The positive control is the point: prove the probe SEES a bad directive
+    before trusting it to report a clean one.
+    """
+    good = unit("porter-example-service", "Example service", "/bin/true", "/tmp")
+    assert "Unknown key" not in _verify(tmp_path, good), _verify(tmp_path, good)
+
+    bad = good.replace("EnvironmentFile=-", "EnviromentFile=-")
+    assert "Unknown key 'EnviromentFile'" in _verify(tmp_path, bad), (
+        "systemd-analyze did not report a directive it does not know: this probe "
+        "cannot detect the failure it exists to detect"
+    )
 
 
 def test_unit_loads_defaults_then_env_so_admin_wins():
