@@ -134,6 +134,12 @@ extensions on Ubuntu 22.04 (2.35), Debian 12 (2.36), Ubuntu 24.04 (2.39) and
 Debian 13 (2.41) — each `--network none`, no system `python3.12`, and each
 asserting the build-host interpreter path is *absent* before running.
 
+**Verified continuously, not once.** The `glibc-floor` job in
+`.github/workflows/ci.yml` re-runs exactly this on every push — vendor on the
+floor, execute on all four targets under `--network none`. First green run
+2026-08-08 (31241859265). A build host that drifts too new fails there rather
+than at a client, which is the one place this failure is invisible.
+
 **Ubuntu 22.04 is the declared build floor.** It is also what ainbox's CUDA 12.8
 base already forces for the engine, so every package shares one build base.
 
