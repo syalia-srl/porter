@@ -87,6 +87,7 @@ Every load-bearing claim below was measured on 2026-08-07. Probes live in
 | P5/P5b | does a 2 GB `.deb` work, and what does it cost? | **Yes.** Peak transient 2× payload, apt adds no cache cost |
 | P7 | does an install complete with no TTY and stdin closed? | **Yes**, rc=0, no prompt, with a broken apt source and an edited conffile |
 | P8/P8c | `DynamicUser` or a static user for client state? | **Static.** `/var/lib/private` is `700 root:root`; non-root cannot read or list |
+| P9b | can a bundled browser relocate, and is `Depends:` derivable? | **Relocates** (runs from an arbitrary path); **`Depends:` derived automatically** — 24 packages from 32 sonames |
 
 ### P1b — no venv
 
@@ -292,6 +293,84 @@ a mode: there is no interactive path to fall back to on an airgapped client.
 - **`postinst` restarts the service itself** (`systemctl try-restart`), so an
   upgrade needs no follow-up command.
 
+### Near-native desktop (optional)
+
+A web app served on localhost can present as a desktop application:
+`chromium --app=http://127.0.0.1:PORT` gives a window with no tabs and no URL
+bar, resizable, with its own taskbar identity via `--class=`.
+
+**This is the one place the "nothing but glibc and systemd" rule bends**, and it
+bends openly: any GUI browser needs the client's desktop stack — GTK, X11 or
+Wayland, NSS, dbus. That is acceptable *because it is exactly the machine that
+has a desktop*, but it must never contaminate a headless install.
+
+So it is always a **separate package**, `<app>-desktop`, depending on `<app>`
+plus the desktop libraries. On an airgapped box apt cannot fetch a missing GTK,
+so a desktop dependency inside the core package would be fatal on a server. As
+its own package, a missing desktop stack refuses an optional component instead
+of failing the install.
+
+**Launcher-first, bundle-optional.** Most desktop clients already have a browser,
+so the default emits only a launcher that probes `google-chrome`, `chromium`,
+`brave-browser`, `microsoft-edge` in order, uses `--app=` on the first hit, and
+falls back to `xdg-open`. Bundling is for the two cases that defeat it: a desktop
+with no browser at all, and an app whose UI needs a **pinned engine version** —
+a real risk for a modern SPA against an ancient ESR on a client box, and the kind
+of failure you end up debugging remotely.
+
+**porter hardcodes no browser vendor, exactly as it hardcodes no interpreter.**
+The supply is declared per project, as a URL and a checksum:
+
+```yaml
+desktop:
+  name: AInBox
+  url: http://127.0.0.1:8080
+  icon: assets/ainbox.png
+  wait_for_health: /health        # poll before opening, so a click right after
+                                  # login does not show connection-refused
+  browser: system                 # probe what the client has (default)
+# or
+  browser:
+    source: https://.../chromium-linux64.tar.xz
+    sha256: "..."
+```
+
+Chromium (BSD, freely redistributable) is the chosen engine. The exact build to
+pin is an open item — Google publishes no stable Linux tarball for Chromium
+proper, so the artifact comes from a third-party portable build and **must be
+verified against its terms before it ships**, not assumed from this document.
+
+Concretely: the tree used to validate the mechanism was Playwright's, and it
+identifies itself as **`Google Chrome for Testing 149.0.7827.55`** — not Chromium.
+It was a fine measurement subject and is *not* a shippable artifact, which is
+exactly the confusion this paragraph exists to prevent.
+
+Near-native is more than chromelessness: a `.desktop` entry and icon so it
+appears in the app menu, an isolated profile under
+`~/.local/share/<pkg>/browser-profile` so it never shares cookies or history with
+the user's own browser, and `--no-first-run --no-default-browser-check`.
+
+### `Depends:` is derived, never hand-written
+
+Whenever porter bundles a native binary — a browser, `llama-server`, a Go or Rust
+executable — it reads every ELF's `NEEDED` entries with `objdump -p`, resolves
+the sonames through `ldconfig -p`, and maps them to owning packages with a single
+`dpkg -S`, on the **target** distro, at build time.
+
+Measured against a 380 MB Chromium tree: 6 ELF objects, 32 sonames, **24
+packages** — `libnss3`, `libgbm1`, `libcups2t64`, `libatk-bridge2.0-0t64`,
+`libxkbcommon0` and the rest of the GTK/X11 set nobody would enumerate correctly
+by hand.
+
+**Use `objdump`, not `ldd`.** `ldd` executes the dynamic loader once per file; run
+over a browser tree it took long enough to look like a deadlock (it hung a probe
+and had to be killed). `objdump` reads headers and returns in seconds.
+
+A hand-maintained dependency list is precisely how a package installs cleanly and
+then fails to open a window, and it goes stale silently the first time an
+upstream build links something new. Deriving it also means the same mechanism
+covers every future native payload without anyone remembering to update a list.
+
 ### The sandbox: bwrap, not Docker
 
 `apps/sandbox` is the only place Docker is the *product*. Its API surface is six
@@ -415,6 +494,17 @@ Named rather than resolved, with the evidence that exists:
   structural argument above (we upgrade no shared libraries) is what the design
   actually rests on; the env var is belt and braces. Re-test on a real Ubuntu
   host when one is available.
+- **Rendering from the relocated tree is unproven.** The binary runs and reports
+  its version from an arbitrary path, but the headless `--dump-dom` check against
+  a local page failed for reasons not chased down. Relocation of the *executable*
+  is established; rendering is not.
+- **The chromeless window has never been looked at.** Chromium ignores unknown
+  flags silently, so "the flags were accepted" is weak evidence. Whether `--app=`
+  plus `--class=` actually yields a window that reads as native needs a display
+  and a human, and that check has not been done.
+- **The Chromium build to ship is unpinned.** Chromium is BSD and redistributable,
+  but the concrete portable Linux artifact and its terms must be verified before
+  slice 3 rather than inferred.
 - **`sudo -n` refuses rather than prompting**, by choice. A sysadmin running
   interactively as a normal user with password-gated sudo gets an explicit error,
   not a password prompt.

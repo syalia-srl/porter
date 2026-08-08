@@ -1,10 +1,12 @@
-# porter Slice 1 — `une-sigere-api` as a `.deb`
+# porter Slice 1 — the example gallery
 
 > **For agentic workers:** REQUIRED SUB-SKILL: Use superpowers:subagent-driven-development (recommended) or superpowers:executing-plans to implement this plan task-by-task. Steps use checkbox (`- [ ]`) syntax for tracking.
 
-**Goal:** porter builds, gates and publishes une-tools' `sigere-api` as an installable, upgradable `.deb` that runs on an airgapped Debian-family box with no Docker and no system Python.
+**Goal:** porter builds, gates and publishes a gallery of in-repo example projects covering every packaging shape we care about — a FastAPI service, a plain command, a scheduled oneshot, a multi-component suite, and a near-native desktop app — each installable and upgradable on an airgapped Debian-family box with no Docker and no system Python.
 
-**Architecture:** Six tasks, vertically sliced. Task 1 vendors a relocatable CPython; Task 2 turns a staged tree into a `.deb`; **Task 3 is the end-to-end moment** — a real systemd service answering HTTP from an installed package; Task 4 adds the USB apt repo and the upgrade path; Task 5 adds the gate; Task 6 replaces the toy app with the real `sigere-api`. Every stage shells out to `dpkg-deb`, `tar` and `systemd-nspawn` rather than reimplementing them.
+**Architecture:** Seven tasks, vertically sliced. Task 1 vendors a relocatable CPython; Task 2 turns a staged tree into a `.deb`; **Task 3 is the end-to-end moment** — `examples/service-fastapi` answering HTTP from an installed package under a real systemd unit; Task 4 adds the USB apt repo and the upgrade path; Task 5 adds the gate; Task 6 fills in the rest of the gallery; Task 7 adds the desktop shape and the derived-`Depends:` mechanism it needs.
+
+**Why examples before a real app.** The gallery is a shipped feature, not scaffolding: it is porter's documentation *and* its regression suite. Every example is a gate fixture, so each packaging shape is exercised on every build, and a new consumer starts by copying the example nearest its shape rather than reading a schema. It also keeps slice 1 free of any cross-repo dependency — `une-sigere-api` is slice 2, and by then every mechanism it needs has been proven against something we control.
 
 **Tech Stack:** Python 3.12+, `microcli-toolkit` (CLI), `pyyaml`, `uv` (fetches python-build-standalone), `dpkg-deb`, Docker (build/test only), `systemd-nspawn` (gate).
 
@@ -45,6 +47,11 @@ Copied verbatim from `docs/design-spec.md`. Every task's requirements implicitly
 | `src/porter/spec.py` | Parse `porter.yaml` into a `Component`. |
 | `src/porter/cli.py` | microcli surface: `build`, `gate`, `publish`. |
 | `tests/conftest.py` | Session-scoped vendored interpreter; `docker` / `nspawn` markers. |
+| `examples/service-fastapi/` | The canonical shape: HTTP service, systemd unit, split config, port. |
+| `examples/command/` | A CLI installed to `/usr/bin`. No unit, no `/etc`, no state. |
+| `examples/oneshot-timer/` | A scheduled job: oneshot unit + `.timer`, writes to `/var/lib/<pkg>/`. |
+| `examples/suite/` | Two components plus a metapackage — the UNE two-machine shape. |
+| `examples/desktop-app/` | Near-native: chromeless browser launcher, `.desktop`, icon. |
 
 ---
 
@@ -354,9 +361,14 @@ git commit -m "feat(deb): build packages from a staged tree, with FHS ownership 
 
 ### Task 3: Split config + systemd unit — the end-to-end moment
 
+This task produces the first gallery entry. The "demo app" is
+`examples/service-fastapi`, and it stays in the repo as documentation and as the
+fixture every later task reuses.
+
 **Files:**
 - Create: `src/porter/config.py`
 - Create: `src/porter/systemd.py`
+- Create: `examples/service-fastapi/{porter.yaml,src/app.py}`
 - Create: `tests/test_config.py`
 - Create: `tests/test_service_e2e.py`
 
@@ -569,7 +581,7 @@ Note for the implementer: `/etc/<pkg>/env` is mode 600 root, and the service run
 - [ ] **Step 4: Run the tests**
 
 Run: `uv run pytest tests/test_config.py -v` → 4 passed
-Then add the `built_demo_deb` / `docker_image` fixtures to `tests/conftest.py` (stage a FastAPI app returning `{"greeting": os.environ["GREETING"], "tuning": os.environ["TUNING"]}`, with `TUNING=from-defaults` in the template and `GREETING` as the sole admin key), and run:
+Then write `examples/service-fastapi/src/app.py` as a FastAPI app returning `{"greeting": os.environ["GREETING"], "tuning": os.environ["TUNING"]}`, with `TUNING=from-defaults` in `defaults` and `GREETING` as the sole entry in `admin_keys`; add the `built_demo_deb` / `docker_image` fixtures to `tests/conftest.py` that build it. Then run:
 Run: `uv run pytest tests/test_service_e2e.py -v -m docker`
 Expected: PASS — the response carries `from-admin` and `from-defaults`
 
@@ -952,97 +964,172 @@ git commit -m "feat(gate): prove bundles offline, with controls and mutation tes
 
 ---
 
-### Task 6: `une-sigere-api` — the real component
+### Task 6: the rest of the gallery — command, oneshot, suite
 
 **Files:**
-- Create: `src/porter/spec.py`
-- Create: `src/porter/cli.py` (currently empty)
-- Create: `repos/une-tools/porter.yaml` (in the une-tools repo)
-- Create: `tests/test_spec.py`
+- Create: `src/porter/spec.py`, `src/porter/cli.py`
+- Create: `examples/command/{porter.yaml,src/hello.py}`
+- Create: `examples/oneshot-timer/{porter.yaml,src/tick.py}`
+- Create: `examples/suite/porter.yaml`
+- Create: `tests/test_spec.py`, `tests/test_examples.py`
 
 **Interfaces:**
 - Consumes: everything above.
-- Produces: `Component` dataclass (`name`, `package`, `version`, `entrypoint`, `requirements`, `defaults`, `admin_keys`, `description`); `load(path: Path) -> list[Component]`; CLI `porter build|gate|publish`.
+- Produces: `Python` and `Component` dataclasses; `load(path) -> tuple[Python, list[Component]]`; `Component.kind` in `{"service", "command", "oneshot", "meta"}`; CLI `porter build|gate|publish`.
 
-- [ ] **Step 1: Write `porter.yaml` against the real component**
+- [ ] **Step 1: Write the three example manifests**
 
 ```yaml
-# repos/une-tools/porter.yaml
-# Derived from deploy/release/sigere-api/{requirements.txt,env.example,Makefile}.
+# examples/command/porter.yaml — a CLI. No unit, no /etc, no state.
 build_floor: ubuntu:22.04
-
-# The interpreter this project needs. porter hardcodes neither the version nor
-# a package name -- `bundled` puts it inside each component's own .deb, which is
-# what slice 1 implements. A project with several components declares a shared
-# package name here instead, and porter emits it as its own .deb.
-python:
-  version: "3.12"
-  package: bundled
-
+python: {version: "3.12", package: bundled}
 components:
-  - name: sigere-api
-    package: une-sigere-api
-    description: Read-only HTTP adapter over the SIGERE SQL Server
-    entrypoint: apps.sigere.backend.main:app
-    source_paths: [apps/sigere, apps/__init__.py]
-    requirements: deploy/release/sigere-api/requirements.txt
-    constraints: uv.lock
-    health: /health
-
-    # Package-owned. These are measured constants, not preferences -- see the
-    # comments in env.example. Under the old .env scheme a client who had
-    # edited their file could NEVER receive a corrected TDS version; as a
-    # conffile they arrive on every upgrade.
-    defaults:
-      SIGERE_PORT: "8095"
-      SIGERE_DB_PORT: "1433"
-      SIGERE_DB_LOGIN_TIMEOUT: "5"
-      SIGERE_DB_TIMEOUT: "30"
-      SIGERE_DB_TDS_VERSION: "7.0"
-      SIGERE_DB_CHARSET: LATIN1
-
-    # Admin-owned, per site. postinst seeds them empty; <app>-setup fills them.
-    admin_keys: [SIGERE_DB_HOST, SIGERE_DB_NAME, SIGERE_DB_USER, SIGERE_DB_PASSWORD]
+  - name: hello
+    package: porter-example-command
+    kind: command
+    description: A command-line tool with a vendored interpreter
+    entrypoint: hello:main          # exposed at /usr/bin/porter-hello
+    bin_name: porter-hello
+    source_paths: [src]
+    requirements: []
 ```
 
-- [ ] **Step 2: Write the failing test**
+```yaml
+# examples/oneshot-timer/porter.yaml — a scheduled job.
+build_floor: ubuntu:22.04
+python: {version: "3.12", package: bundled}
+components:
+  - name: tick
+    package: porter-example-oneshot
+    kind: oneshot
+    description: Writes a timestamp into client state on a schedule
+    entrypoint: tick:main
+    source_paths: [src]
+    requirements: []
+    schedule: "*-*-* *:00:00"       # hourly; becomes OnCalendar= in the .timer
+    defaults: {TICK_LABEL: scheduled}
+    admin_keys: []
+```
+
+```yaml
+# examples/suite/porter.yaml — two components + a metapackage.
+# This is UNE's two-machine shape: one name per machine, dpkg resolves the rest.
+build_floor: ubuntu:22.04
+python: {version: "3.12", package: bundled}
+components:
+  - name: api
+    package: porter-example-suite-api
+    kind: service
+    description: Suite API component
+    entrypoint: app:app
+    source_paths: [../service-fastapi/src]
+    requirements: [fastapi, uvicorn]
+    defaults: {PORT: "9101"}
+    admin_keys: [API_TOKEN]
+    health: /health
+  - name: tool
+    package: porter-example-suite-tool
+    kind: command
+    description: Suite CLI component
+    entrypoint: hello:main
+    bin_name: porter-suite-tool
+    source_paths: [../command/src]
+    requirements: []
+metapackages:
+  - package: porter-example-suite
+    description: Installs the whole suite
+    depends: [porter-example-suite-api, porter-example-suite-tool]
+```
+
+- [ ] **Step 2: Write the failing tests**
 
 ```python
 # tests/test_spec.py
 from pathlib import Path
+import pytest
 from porter.spec import load
 
-FIXTURE = Path(__file__).parent / "fixtures/porter.yaml"
+EX = Path(__file__).parents[1] / "examples"
 
 
 def test_python_block_is_project_declared_not_hardcoded():
-    python, _ = load(FIXTURE)
+    python, _ = load(EX / "service-fastapi/porter.yaml")
     assert python.version == "3.12"
-    assert python.bundled, "slice 1 ships a bundled interpreter"
+    assert python.bundled
 
 
-def test_loads_the_sigere_component():
-    _, comps = load(FIXTURE)
-    assert len(comps) == 1
-    c = comps[0]
-    assert c.package == "une-sigere-api"
-    assert c.entrypoint == "apps.sigere.backend.main:app"
-    assert c.defaults["SIGERE_DB_TDS_VERSION"] == "7.0"
-    assert "SIGERE_DB_PASSWORD" in c.admin_keys
-    assert "SIGERE_DB_PASSWORD" not in c.defaults, "a secret must never be package-owned"
+def test_every_example_manifest_parses():
+    """The gallery is the regression suite; a manifest that stops parsing is a
+    porter bug, not an example bug."""
+    for manifest in sorted(EX.glob("*/porter.yaml")):
+        python, comps = load(manifest)
+        assert comps, f"{manifest} declared no components"
+        assert python.version
+
+
+def test_kinds_cover_every_shape_we_ship():
+    kinds = {c.kind for m in EX.glob("*/porter.yaml") for c in load(m)[1]}
+    assert {"service", "command", "oneshot"} <= kinds
 
 
 def test_rejects_a_key_declared_in_both_halves():
-    """One key, two owners is the exact defect the split exists to remove."""
-    import pytest
-    bad = FIXTURE.parent / "porter-overlap.yaml"
+    """One key, two owners is the exact defect the split config removes."""
     with pytest.raises(ValueError, match="both defaults and admin_keys"):
-        load(bad)
+        load(EX.parent / "tests/fixtures/porter-overlap.yaml")
 ```
 
-Copy `repos/une-tools/porter.yaml` to `tests/fixtures/porter.yaml`, and make `porter-overlap.yaml` a copy with `SIGERE_PORT` added to `admin_keys`.
+```python
+# tests/test_examples.py
+import subprocess
+from pathlib import Path
+import pytest
 
-- [ ] **Step 3: Run test to verify it fails**
+pytestmark = pytest.mark.docker
+EX = Path(__file__).parents[1] / "examples"
+
+
+def test_command_example_is_runnable_after_install(built_usb, docker_image):
+    """kind: command produces no unit and no /etc -- just a working binary."""
+    usb = built_usb("command")
+    script = ("set -e; bash /media/usb/install.sh >/dev/null 2>&1; "
+              "porter-hello --version; "
+              "test ! -e /usr/lib/systemd/system/porter-example-command.service && echo NO_UNIT; "
+              "test ! -d /etc/porter-example-command && echo NO_ETC")
+    proc = subprocess.run(["docker", "run", "--rm", "--network", "none",
+                           "-v", f"{usb}:/media/usb:ro", docker_image, "bash", "-c", script],
+                          capture_output=True, text=True)
+    assert proc.returncode == 0, proc.stderr
+    assert "NO_UNIT" in proc.stdout and "NO_ETC" in proc.stdout
+
+
+def test_oneshot_example_writes_client_state(built_usb, docker_image):
+    usb = built_usb("oneshot-timer")
+    script = ("set -e; bash /media/usb/install.sh >/dev/null 2>&1; "
+              "test -f /usr/lib/systemd/system/porter-example-oneshot.timer && echo HAS_TIMER; "
+              "/usr/lib/porter-example-oneshot/python/bin/python3.12 "
+              "  -c 'import sys; sys.path.insert(0,\"/usr/lib/porter-example-oneshot\"); "
+              "     import tick; tick.main()'; "
+              "cat /var/lib/porter-example-oneshot/last-tick.txt")
+    proc = subprocess.run(["docker", "run", "--rm", "--network", "none",
+                           "-v", f"{usb}:/media/usb:ro", docker_image, "bash", "-c", script],
+                          capture_output=True, text=True)
+    assert proc.returncode == 0, proc.stderr
+    assert "HAS_TIMER" in proc.stdout
+    assert "scheduled" in proc.stdout
+
+
+def test_suite_metapackage_pulls_both_components(built_usb, docker_image):
+    usb = built_usb("suite")
+    script = ("set -e; bash /media/usb/install.sh >/dev/null 2>&1; "
+              "dpkg-query -W -f='${Status}\\n' porter-example-suite-api porter-example-suite-tool")
+    proc = subprocess.run(["docker", "run", "--rm", "--network", "none",
+                           "-v", f"{usb}:/media/usb:ro", docker_image, "bash", "-c", script],
+                          capture_output=True, text=True)
+    assert proc.returncode == 0, proc.stderr
+    assert proc.stdout.count("install ok installed") == 2, proc.stdout
+```
+
+- [ ] **Step 3: Run tests to verify they fail**
 
 Run: `uv run pytest tests/test_spec.py -v`
 Expected: FAIL — `ModuleNotFoundError: No module named 'porter.spec'`
@@ -1056,6 +1143,8 @@ from __future__ import annotations
 from dataclasses import dataclass, field
 from pathlib import Path
 import yaml
+
+KINDS = {"service", "command", "oneshot", "meta"}
 
 
 @dataclass
@@ -1079,13 +1168,28 @@ class Component:
     name: str
     package: str
     description: str
-    entrypoint: str
-    source_paths: list[str]
-    requirements: str
+    kind: str = "service"
+    entrypoint: str | None = None
+    bin_name: str | None = None
+    source_paths: list[str] = field(default_factory=list)
+    requirements: list[str] | str = field(default_factory=list)
     defaults: dict[str, str] = field(default_factory=dict)
     admin_keys: list[str] = field(default_factory=list)
     constraints: str | None = None
     health: str = "/health"
+    schedule: str | None = None
+
+    def __post_init__(self):
+        if self.kind not in KINDS:
+            raise ValueError(f"{self.package}: unknown kind {self.kind!r} (want one of {sorted(KINDS)})")
+        if self.kind == "oneshot" and not self.schedule:
+            raise ValueError(f"{self.package}: kind 'oneshot' needs a schedule")
+        if self.kind == "command" and not self.bin_name:
+            raise ValueError(f"{self.package}: kind 'command' needs a bin_name")
+        overlap = set(self.defaults) & set(self.admin_keys)
+        if overlap:
+            raise ValueError(
+                f"{self.package}: {sorted(overlap)} declared in both defaults and admin_keys")
 
 
 def load(path: Path) -> tuple[Python, list[Component]]:
@@ -1093,14 +1197,12 @@ def load(path: Path) -> tuple[Python, list[Component]]:
     python = Python(**doc["python"])
     if python.package != "bundled" and not python.package.strip():
         raise ValueError("python.package must be 'bundled' or a package name")
-    out = []
-    for raw in doc["components"]:
-        overlap = set(raw.get("defaults", {})) & set(raw.get("admin_keys", []))
-        if overlap:
-            raise ValueError(
-                f"{raw['package']}: {sorted(overlap)} declared in both defaults and admin_keys")
-        out.append(Component(**raw))
-    return python, out
+    comps = [Component(**raw) for raw in doc.get("components", [])]
+    for meta in doc.get("metapackages", []):
+        comps.append(Component(name=meta["package"], package=meta["package"],
+                               description=meta["description"], kind="meta",
+                               admin_keys=[], defaults={}))
+    return python, comps
 ```
 
 ```python
@@ -1120,37 +1222,247 @@ def build(config: str = "porter.yaml", out: str = "dist"):
     """Bake, assemble, lint and package every component in the config."""
     python, components = load(Path(config))
     for component in components:
-        print(f"building {component.package} (python {python.version}, {python.package})")
-    # Wired to interpreter.vendor -> interpreter.install -> deb.build_deb
-    # in this task; see docs/plans/2026-08-07-slice-1-sigere-api.md.
+        print(f"building {component.package} [{component.kind}] "
+              f"(python {python.version}, {python.package})")
 
 
 def main():
     app.main()
 ```
 
-- [ ] **Step 5: Wire `build` end-to-end and gate the real package**
+- [ ] **Step 5: Run every test**
 
-Stage into `usr/lib/une-sigere-api/` (vendored interpreter + `apps/sigere`), `usr/share/une-sigere-api/env.example`, `etc/une-sigere-api/defaults`, `usr/lib/systemd/system/une-sigere-api.service` with
-`ExecStart=/usr/lib/une-sigere-api/python/bin/python3.12 -m uvicorn apps.sigere.backend.main:app --host 0.0.0.0 --port ${SIGERE_PORT}`.
-
-```bash
-cd /home/apiad/Workspace/repos/une-tools
-uv run --project ../porter porter build --config porter.yaml --out dist/
-uv run --project ../porter porter publish --out /tmp/une-usb
-uv run --project ../porter porter gate --usb /tmp/une-usb --app une-sigere-api
-```
-
-Expected: the gate reports green, and `du -sh dist/une-sigere-api_*.deb` is around 140 MB — the component's three real dependencies measured 42 MB, plus the 97 MB bundled interpreter. Slice 1 uses `python.package: bundled`; a project that later declares a shared interpreter package drops this to ~42 MB.
+Run: `uv run pytest tests/ -v -m "not nspawn"`
+Expected: all green, including the three gallery tests under `-m docker`
 
 - [ ] **Step 6: Commit**
 
 ```bash
-git add src/porter/spec.py src/porter/cli.py tests/test_spec.py tests/fixtures/
-git commit -m "feat(spec): porter.yaml, and une-sigere-api as the first real package"
-cd /home/apiad/Workspace/repos/une-tools
-git add porter.yaml
-git commit -m "feat(release): declare sigere-api as a porter component"
+git add src/porter/spec.py src/porter/cli.py examples/ tests/test_spec.py tests/test_examples.py
+git commit -m "feat(examples): command, oneshot and suite shapes as gate fixtures"
+```
+
+---
+
+### Task 7: the desktop shape, and `Depends:` derived from ELF headers
+
+**Files:**
+- Create: `src/porter/depends.py`
+- Create: `src/porter/desktop.py`
+- Create: `examples/desktop-app/{porter.yaml,src/app.py,assets/icon.png}`
+- Create: `tests/test_depends.py`, `tests/test_desktop.py`
+
+**Interfaces:**
+- Consumes: `build_deb` (Task 2), `Component` (Task 6).
+- Produces: `derive_depends(tree: Path) -> list[str]`; `launcher(pkg, url, health, name) -> str`; `desktop_entry(pkg, name, icon) -> str`.
+
+- [ ] **Step 1: Write the failing tests**
+
+```python
+# tests/test_depends.py
+import shutil, subprocess
+from pathlib import Path
+import pytest
+from porter.depends import derive_depends
+
+
+def test_derives_packages_from_a_real_binary(tmp_path):
+    """A hand-written Depends: is how a package installs cleanly and then cannot
+    open a window. Derive it from ELF headers instead."""
+    tree = tmp_path / "payload"; tree.mkdir()
+    shutil.copy(shutil.which("bash"), tree / "bash")
+    deps = derive_depends(tree)
+    assert deps, "no dependencies derived from a real dynamically-linked binary"
+    assert any("libc" in d for d in deps), deps
+
+
+def test_ignores_libraries_the_payload_ships_itself(tmp_path):
+    """A bundled tree carries its own .so files; those are not system deps."""
+    tree = tmp_path / "payload"; tree.mkdir()
+    shutil.copy(shutil.which("bash"), tree / "bash")
+    (tree / "libselfshipped.so.1").write_bytes(b"\x7fELF")
+    assert not any("selfshipped" in d for d in derive_depends(tree))
+
+
+def test_empty_tree_derives_nothing(tmp_path):
+    assert derive_depends(tmp_path) == []
+```
+
+```python
+# tests/test_desktop.py
+from porter.desktop import launcher, desktop_entry
+
+
+def test_launcher_probes_browsers_in_order_and_uses_app_mode():
+    body = launcher("ainbox", "http://127.0.0.1:8080", "/health", "AInBox")
+    order = [body.index(b) for b in ("google-chrome", "chromium", "brave-browser")]
+    assert order == sorted(order), "browser probe order is not deterministic"
+    assert "--app=" in body
+    assert "--class=" in body
+    assert "--no-first-run" in body
+
+
+def test_launcher_waits_for_health_before_opening():
+    """Clicking the icon right after login must not show connection-refused
+    while systemd is still bringing the stack up."""
+    body = launcher("ainbox", "http://127.0.0.1:8080", "/health", "AInBox")
+    assert "/health" in body
+    assert body.index("/health") < body.index("--app="), "opens before waiting"
+
+
+def test_launcher_uses_an_isolated_profile():
+    body = launcher("ainbox", "http://127.0.0.1:8080", "/health", "AInBox")
+    assert "--user-data-dir=" in body
+    assert ".local/share/ainbox" in body
+
+
+def test_desktop_entry_is_valid(tmp_path):
+    import shutil, subprocess
+    entry = tmp_path / "ainbox.desktop"
+    entry.write_text(desktop_entry("ainbox", "AInBox", "ainbox"))
+    if shutil.which("desktop-file-validate"):
+        proc = subprocess.run(["desktop-file-validate", str(entry)],
+                              capture_output=True, text=True)
+        assert proc.returncode == 0, proc.stdout + proc.stderr
+```
+
+- [ ] **Step 2: Run tests to verify they fail**
+
+Run: `uv run pytest tests/test_depends.py tests/test_desktop.py -v`
+Expected: FAIL — `ModuleNotFoundError: No module named 'porter.depends'`
+
+- [ ] **Step 3: Write the implementation**
+
+```python
+# src/porter/depends.py
+"""Derive Depends: from what the payload actually links.
+
+objdump reads ELF headers; it never executes the loader. `ldd` does, and running
+it per file over a browser tree takes minutes (measured: it hung a probe long
+enough to look like a deadlock).
+"""
+from __future__ import annotations
+
+import subprocess
+from pathlib import Path
+
+
+def _sonames(elf: Path) -> list[str]:
+    proc = subprocess.run(["objdump", "-p", str(elf)], capture_output=True, text=True)
+    if proc.returncode != 0:
+        return []
+    return [ln.split()[1] for ln in proc.stdout.splitlines() if "NEEDED" in ln]
+
+
+def derive_depends(tree: Path) -> list[str]:
+    tree = Path(tree)
+    elves = [f for f in tree.rglob("*")
+             if f.is_file() and f.open("rb").read(4) == b"\x7fELF"]
+    if not elves:
+        return []
+    needed: set[str] = set()
+    for f in elves:
+        needed.update(_sonames(f))
+    # Anything the payload ships itself is not a system dependency.
+    own = {f.name for f in tree.rglob("*.so*")}
+    external = sorted(needed - own)
+
+    cache = subprocess.run(["ldconfig", "-p"], capture_output=True, text=True).stdout
+    paths = []
+    for so in external:
+        for line in cache.splitlines():
+            parts = line.strip().split()
+            if parts and parts[0] == so:
+                paths.append(parts[-1])
+                break
+    if not paths:
+        return []
+    proc = subprocess.run(["dpkg", "-S", *paths], capture_output=True, text=True)
+    pkgs = {p.strip() for line in proc.stdout.splitlines()
+            for p in line.split(":", 1)[0].split(",")}
+    return sorted(pkgs)
+```
+
+```python
+# src/porter/desktop.py
+"""Near-native: a chromeless window, an app-menu entry, an isolated profile.
+
+Launcher-first. Most desktop clients already have a browser, and
+`--app=URL` gives a window with no tabs and no URL bar; `--class` gives it its
+own taskbar identity. A bundled browser is opt-in, for a client with no browser
+or an app that needs a pinned engine.
+"""
+from __future__ import annotations
+
+BROWSERS = ("google-chrome", "chromium", "chromium-browser", "brave-browser", "microsoft-edge")
+
+
+def launcher(pkg: str, url: str, health: str, name: str, bundled: str | None = None) -> str:
+    probe = "\n".join(
+        f'  command -v {b} >/dev/null 2>&1 && BROWSER={b} && break' for b in BROWSERS)
+    bundled_line = f'BROWSER="{bundled}"' if bundled else ""
+    return f"""#!/usr/bin/env bash
+# Launcher for {name}. Opens a chromeless window against the local service.
+set -euo pipefail
+URL="{url}"
+PROFILE="$HOME/.local/share/{pkg}/browser-profile"
+mkdir -p "$PROFILE"
+
+# Wait for the service before opening, so a click right after login does not
+# land on connection-refused while systemd is still starting the stack.
+for _ in $(seq 1 30); do
+  curl -fsS -o /dev/null "$URL{health}" 2>/dev/null && break
+  sleep 1
+done
+
+BROWSER=""
+{bundled_line}
+if [ -z "$BROWSER" ]; then
+  for _ in 1; do
+{probe}
+  done
+fi
+if [ -z "$BROWSER" ]; then
+  exec xdg-open "$URL"
+fi
+exec "$BROWSER" --app="$URL" --class={name} \
+  --user-data-dir="$PROFILE" --no-first-run --no-default-browser-check
+"""
+
+
+def desktop_entry(pkg: str, name: str, icon: str) -> str:
+    return f"""[Desktop Entry]
+Type=Application
+Name={name}
+Comment={name}
+Exec=/usr/bin/{pkg}-desktop
+Icon={icon}
+Terminal=false
+Categories=Office;
+StartupWMClass={name}
+"""
+```
+
+- [ ] **Step 4: Run tests to verify they pass**
+
+Run: `uv run pytest tests/test_depends.py tests/test_desktop.py -v`
+Expected: all green
+
+- [ ] **Step 5: Wire `examples/desktop-app` and gate it**
+
+```bash
+uv run porter build --config examples/desktop-app/porter.yaml --out dist/
+uv run porter publish --out /tmp/desktop-usb
+uv run porter gate --usb /tmp/desktop-usb --app porter-example-desktop
+```
+
+Expected: two packages — `porter-example-desktop` (the service, no desktop deps) and `porter-example-desktop-desktop` (launcher, `.desktop`, icon, derived `Depends:`). The gate asserts the core package installs on a **headless** image where the desktop package's dependencies are absent; that is the property that keeps a server install from being blocked.
+
+- [ ] **Step 6: Commit**
+
+```bash
+git add src/porter/depends.py src/porter/desktop.py examples/desktop-app/ tests/test_depends.py tests/test_desktop.py
+git commit -m "feat(desktop): chromeless launcher, .desktop entry, derived Depends"
 ```
 
 ---
@@ -1159,14 +1471,19 @@ git commit -m "feat(release): declare sigere-api as a porter component"
 
 Named so they are decisions, not omissions:
 
+- **`une-sigere-api`, and every real app.** Slice 2. The gallery proves each
+  mechanism against something we control first; a real migration should not be
+  where a packaging bug is discovered. By then `sigere-api` needs no new
+  machinery — it is the `service` shape with a `constraints:` file.
 - **`python.package: shared`.** Slice 1 only implements `bundled`, which vendors the interpreter inside `une-sigere-api` (~97 MB duplicated the moment a second component exists). Emitting a separate interpreter package — named by the project, not by porter — is slice 2, once there are two consumers to prove the `Depends:` actually resolves offline.
 - **`<app>-setup`**, the interactive first-run wizard. Slice 1 seeds `/etc/<pkg>/env` with empty placeholders; the sysadmin edits it by hand, exactly as today.
 - **`systemd-nspawn` gating.** Task 5 gates in Docker with `--network none`, which proves the payload, the upgrade and client-state survival but *not* the unit under real systemd. nspawn arrives with slice 2.
 - **GPG signing** of the repo (`[trusted=yes]` for now), the bwrap sandbox, and metapackages for UNE's two machines.
+- **The `<app>-desktop` package** — chromeless browser, `.desktop` entry, icon, isolated profile. `sigere-api` is a headless service with no UI, so it cannot exercise any of it; that work belongs to the AInBox slice, where a near-native window is the point. What slice 1 *does* establish for it is the auto-derived `Depends:` mechanism, which the browser bundle needs and `sigere-api` does not.
 
 ## Self-review
 
-- **Spec coverage.** FHS contract → Task 2 lint; split config → Task 3; install≠configure≠update → Tasks 3–4; systemd replaces compose → Task 3; delivery/USB → Task 4; gate → Task 5; `porter.yaml` → Task 6. Sandbox, GPU, metapackages and migrations are explicitly deferred above.
-- **Symbols checked against real `main`:** `apps/sigere/backend/main.py` exists and defines `app = FastAPI(...)` at line 27 with `@app.get("/health")` at line 80; `deploy/release/sigere-api/requirements.txt` lists exactly `fastapi`, `uvicorn[standard]`, `pymssql`; every `SIGERE_*` key above is copied from `deploy/release/sigere-api/env.example`.
-- **Type consistency:** `build_deb`, `vendor`, `install`, `split`, `env_postinst`, `unit`, `write_index`, `usb_tree`, `gate`, `load` are each defined once and referenced with matching signatures.
-- **Known gap, deliberate:** Task 3's `built_demo_deb` / `docker_image` and Tasks 4–5's `two_demo_debs` / `good_usb` / `state_eating_usb` / `truncated_usb` fixtures are described rather than written out. They are mechanical compositions of Tasks 1–2 and writing them here would duplicate ~150 lines; the *mutations* they must express are specified exactly.
+- **Spec coverage.** FHS contract → Task 2 lint; split config → Task 3; install≠configure≠update → Tasks 3–4; systemd replaces compose → Tasks 3 and 6; autonomous install → Task 4, asserted in Task 5; delivery/USB → Task 4; gate → Task 5; `porter.yaml` and every packaging shape → Task 6; desktop and derived `Depends:` → Task 7. Sandbox, GPU, GPG signing and real-app migrations are explicitly deferred above.
+- **Type consistency:** `build_deb`, `vendor`, `install`, `split`, `env_postinst`, `unit`, `write_index`, `usb_tree`, `gate`, `load`, `derive_depends`, `launcher`, `desktop_entry` are each defined once and referenced with matching signatures. `load` returns `(Python, list[Component])` everywhere.
+- **Known gap, deliberate:** the pytest fixtures (`built_demo_deb`, `docker_image`, `two_demo_debs`, `built_usb`, `good_usb`, `state_eating_usb`, `truncated_usb`) are described rather than written out. They are mechanical compositions of Tasks 1–2 and writing them here would duplicate several hundred lines; the *mutations* and properties they must express are specified exactly. Write them in Task 3 and extend per task.
+- **Deferred verification, carried from the spec:** whether the chromeless window genuinely reads as native is a visual check needing a display and a human; and the concrete Chromium build to bundle must be verified against its terms before Task 7 ships, not inferred.

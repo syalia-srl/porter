@@ -57,6 +57,15 @@ evidence; this is the short form.
 10. **porter hardcodes no interpreter name or version.** Which Python, and
     whether it is bundled per component or emitted as its own package, is
     declared in each project's `porter.yaml`. No vendor prefix belongs in porter.
+    The same rule governs the optional bundled browser: the project declares the
+    URL and checksum, porter picks no vendor.
+11. **`Depends:` is derived from `ldd`, never hand-written.** Any bundled native
+    binary gets its libraries mapped to target-distro packages at build time. A
+    hand-kept list is how a package installs cleanly and then cannot open a
+    window, and it goes stale silently on the next upstream build.
+12. **A desktop dependency never enters the core package.** GUI needs GTK/X11/NSS
+    from the client, which apt cannot fetch on an airgapped box — so it lives in
+    a separate `<app>-desktop` package and can never block a headless install.
 
 ## The gate rule
 
@@ -102,7 +111,7 @@ done twice.)*
 ## State
 
 **Scaffold. No implementation yet.** The design is settled and measured; the
-first slice is `docs/plans/2026-08-07-slice-1-sigere-api.md`.
+first slice is `docs/plans/2026-08-07-slice-1-example-gallery.md`.
 
 The `porter.yaml` schema is deliberately unspecified — it gets derived from real
 repos during the first migrations, not invented up front. Fixing a schema before
