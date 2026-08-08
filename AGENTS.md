@@ -235,6 +235,19 @@ clean tree. `find src tests -name __pycache__ -type d -exec rm -rf {} +`.
   meant the command succeeded exactly once. Anything invoking porter's own
   entry point belongs in that file, run from a scratch cwd with every path
   relative, and run **twice**.
+- **Tasks 9–11 done:** `bake.py` (data built before packaging, WAL-checkpointed
+  and magnitude-asserted), `migrate.py` (migrations keyed on dpkg's `$2`, so they
+  run exactly once, plus `<pkg>-setup`), and `systemd.py` ordering (`after:` →
+  `After=`/`Requires=`, cycles refused) with `kind: oneshot` (`Type=oneshot`, a
+  `.timer`, the timer enabled rather than the service).
+- **The gallery is five examples:** `service-fastapi`, `baked-data`,
+  `stateful-service`, `oneshot-timer`, `multi-service` (3 components → 3 `.deb`s).
+  Each builds from a clean tree. `examples/command` is still owed.
+- **156 tests, 67 guard entries.** Run `scripts/reverify-guards.sh` before a
+  release; it isolates itself in a worktree and takes ~9 minutes.
+- **Next:** the wave fix round (a freshly installed timer does not arm until
+  reboot; generated shell is never syntax-checked), then Tasks 5–8 and 12–15.
+
 - **Next:** the nspawn gate, which is where the emitted unit is
   finally *started* by systemd. Nothing so far has run one. What *is* exercised:
   the container e2e reads `ExecStart=` and `WorkingDirectory=` out of the
