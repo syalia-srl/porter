@@ -500,6 +500,25 @@ shape, and it needs nothing from porter beyond the above.
 
 Named rather than resolved, with the evidence that exists:
 
+- **No systemd unit has ever been *started* by systemd.** `User=`,
+  `StateDirectory=`, `ProtectSystem=strict`, `Restart=on-failure` and the rest
+  are, as of 2026-08-08, text assertions on the emitted file plus
+  `systemd-analyze verify`. The end-to-end tests run the service by invoking its
+  command line in a container, which has no PID 1 systemd. So the *unit* is
+  syntactically valid and the *program* runs; that the two compose has not been
+  demonstrated. The nspawn gate exists for exactly this and must not assume
+  otherwise.
+- **Mutation evidence has a silent invalidation path, now mitigated.** CPython
+  invalidates `.pyc` on source mtime *and* size, so an equal-length edit reverted
+  inside the same second leaves stale bytecode that Python considers current — a
+  mutation can appear to have been reverted while still running. Found 2026-08-08
+  during Task 3, after which every guard in Tasks 1–2 was re-verified with caches
+  purged and all still bite. `scripts/reverify-guards.sh` is the standing check;
+  a guard with no entry there is unverified.
+- **The build host has a disk ceiling.** zion's `/` sits at 98% with
+  `/var/lib/docker` on it and nothing safely reclaimable. A test run has already
+  hit 100% mid-suite and produced a `dpkg-deb` broken pipe. Work needing real
+  disk — bundled native binaries, an nspawn rootfs — belongs on a host with room.
 - **`slirp4netns` egress is unproven.** Only the isolation direction was tested
   (host `127.0.0.1` unreachable from the sandbox netns — the security-relevant
   half). The "egress on, but cannot see ainbox services" case is the fiddly one.
