@@ -43,10 +43,16 @@ components:
       module: alpha
     env:
       PORT: "9101"
-      # Seconds spent initialising before the port is bound. 0 here; the
-      # convergence test raises it through /etc/demo-alpha/env, which is the
-      # admin's half of the config split and overrides this value.
-      WARMUP_SECONDS: "0"
+      # Seconds spent initialising before the port is bound, and non-zero so
+      # that the "slow-starting upstream" this example presents actually is one:
+      # at 0 the gateway would find the port open on its first try and the shape
+      # the entry exists to show would never occur.
+      #
+      # `alpha` declares no admin_keys, so this key is PACKAGE-owned: it lands
+      # in /etc/demo-alpha/defaults, which an upgrade replaces. An admin who
+      # wants a different warm-up puts WARMUP_SECONDS in /etc/demo-alpha/env,
+      # which is theirs, is never shipped, and is read last.
+      WARMUP_SECONDS: "3"
 
   # The fast upstream. Present so the dependent has TWO dependencies: a single
   # `after:` entry cannot tell a list that is emitted from a list that is
