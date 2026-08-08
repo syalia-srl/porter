@@ -1,0 +1,71 @@
+# porter's example gallery: a command-line tool.
+#
+# The third of the shapes porter serves, and the smallest: a binary on PATH,
+# no unit, no /etc, no state, no system user. une-tools ships four of these
+# (`sigere-export`, the geocoder CLIs); ainbox ships its admin tools this way.
+#
+# `kind: command` has been implemented since Task 4 and refused three shapes by
+# name, and until this file existed the gallery could not say what a correct
+# command manifest looked like -- which is the same as saying the kind had no
+# schema. AGENTS.md: a field with no example exercising it does not exist.
+#
+# What porter emits for this manifest, and nothing else:
+#
+#   /usr/lib/porter-example-command/python/     the vendored interpreter
+#   /usr/lib/porter-example-command/hello.py    the payload
+#   /usr/bin/porter-hello                       a wrapper that execs the two
+#
+# No `/usr/lib/systemd/system/*.service`, no `/etc/porter-example-command/`, no
+# postinst and no static system user. Those are not omissions -- they are the
+# refusals in `assemble._refuse_what_porter_cannot_emit`, and each is there
+# because the plausible alternative fails silently on the client:
+#
+#   - config: postinst would create /etc/<pkg>/env at 600 root:root, which the
+#     operator running the command cannot read, and the wrapper sources
+#     /etc/<pkg>/defaults nowhere -- so the shipped half would be inert. A
+#     command that needs configuration reads its environment or its argv.
+#   - after:  there is no unit, so systemd has nothing to order. The
+#     declaration would be read, accepted and dropped.
+#   - schedule: same, one step further -- no unit means no .timer either.
+#   - migrations: the command branch emits no postinst, so dpkg would have
+#     nothing to call them from and the upgrade would migrate nothing at rc=0.
+
+package: porter-example-command
+version: "1.0"
+description: porter's example command-line tool, with a vendored interpreter
+maintainer: porter <porter@example.com>
+architecture: amd64
+
+kind: command
+
+# The name installed into /usr/bin. Required for this kind and refused when
+# absent: there is no name porter could pick that is not a guess, and the
+# package name is the wrong guess -- `porter-example-command` is what dpkg
+# calls the package, not what an operator types.
+#
+# Deliberately NOT the same string as `package:`. A test that asserts on
+# /usr/bin/<bin_name> while the two are equal cannot tell the wrapper's name
+# from the package's, and the gallery is what the tests read.
+bin_name: porter-hello
+
+# One file, under its own basename in /usr/lib/porter-example-command/ -- which
+# is what the wrapper puts on PYTHONPATH, so `-m hello` finds it. `src` whole
+# would land it one directory deeper and porter refuses that outright.
+source:
+  - src/hello.py
+
+python:
+  version: "3.12"
+  package: bundled
+
+# None: the payload is standard library. That is the point of this entry -- the
+# smallest complete package porter can build, so what remains in it is the
+# interpreter and the two files above, and the 91 MB is visibly all interpreter.
+requirements: []
+
+exec:
+  module: hello
+  args: []
+
+# No `env:` and no `admin_keys:`. Both are refused for this kind (see above),
+# so their absence here is not an oversight to be helpfully filled in later.

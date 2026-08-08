@@ -1,0 +1,154 @@
+# porter's example gallery: a suite delivered as one name per machine.
+#
+# This is une-tools' shape, which is what motivated it: six deliverable
+# components split across two machines -- a technical one (the API, the
+# scheduled sweep) and a corporate one (the front end) -- with an operator CLI
+# on both. The sysadmin at the client site does not install six packages in the
+# right order on the right box. They install ONE name per machine and dpkg
+# resolves the rest from the same USB.
+#
+# `examples/multi-service` already proves several components out of one
+# manifest. What this adds is the `metapackages:` block, and the difference
+# between the two is the sysadmin's runbook:
+#
+#   multi-service:  apt install demo-alpha demo-beta demo-gateway
+#   suite:          apt install porter-example-suite-technical
+#
+# The second is a contract. Which components a role contains becomes porter's
+# problem rather than a line in a document that goes stale the first time a
+# component is added -- and on an airgapped client, a runbook naming a package
+# that is not on the USB fails at the one moment there is no network to fix it.
+#
+# TWO metapackages over ONE component set is the point, not one metapackage per
+# manifest. A single role would be indistinguishable from "install everything",
+# and the case porter exists for is precisely the one where the machines differ.
+# `porter-example-suite-console` is named by both: it is built once, shipped
+# once, and installed by whichever role reaches the box.
+#
+# What `porter build` emits here: four component .debs (~91 MB each, an
+# interpreter apiece) and two metapackage .debs of ~20 KB with no payload at
+# all -- just a control file carrying `Depends:`.
+
+# Shared by every component. `version` and `maintainer` reach the metapackages
+# too; `architecture` deliberately does NOT -- see the note at the bottom.
+version: "1.0"
+maintainer: porter <porter@example.com>
+architecture: amd64
+
+python:
+  version: "3.12"
+  package: bundled
+
+components:
+  # --- the technical machine ------------------------------------------------
+  - name: api
+    package: porter-example-suite-api
+    description: porter's example suite -- the technical machine's HTTP backend
+    kind: service
+    source:
+      - src/api.py
+    exec:
+      module: api
+    env:
+      PORT: "9101"
+
+  # A scheduled job in the same manifest as services and a command. The suite is
+  # where the three kinds have to coexist, because that is what a real
+  # deployment is -- and nothing else in the gallery mixes them: oneshot-timer
+  # is a single flat manifest, multi-service is three services. A metapackage
+  # that resolved only one kind would be a shape that works in the example and
+  # not at the client.
+  - name: sweep
+    package: porter-example-suite-sweep
+    description: porter's example suite -- the technical machine's nightly sweep
+    kind: oneshot
+    schedule: "*-*-* 04:00:00"
+    source:
+      - src/sweep.py
+    exec:
+      module: sweep
+    env:
+      RETENTION_DAYS: "30"
+
+  # --- the corporate machine ------------------------------------------------
+  #
+  # No `after: [api]`, and its absence is deliberate. The API is on the OTHER
+  # BOX: systemd orders units within one host and has no directive that can
+  # name a unit on another. `after:` here would be refused anyway (nothing in
+  # this manifest is called `api` on the corporate machine's install), and if
+  # it were not, it would encode a dependency systemd cannot enforce and the
+  # front end would look ordered when it is not. A cross-machine dependency is
+  # handled where cross-machine dependencies are handled -- by the client
+  # retrying -- and src/desk.py does not connect at start-up for that reason.
+  - name: desk
+    package: porter-example-suite-desk
+    description: porter's example suite -- the corporate machine's front end
+    kind: service
+    source:
+      - src/desk.py
+    exec:
+      module: desk
+    env:
+      PORT: "9102"
+      # The technical machine's address, which is site-specific and therefore
+      # the admin's. It is in `admin_keys`, so it lands in /etc/<pkg>/env --
+      # never shipped, never replaced by an upgrade -- and /etc/<pkg>/defaults
+      # carries only PORT.
+      API_URL: ""
+    admin_keys:
+      - API_URL
+
+  # --- both machines --------------------------------------------------------
+  - name: console
+    package: porter-example-suite-console
+    description: porter's example suite -- the operator CLI, on every machine
+    kind: command
+    bin_name: suite-console
+    source:
+      - src/console.py
+    exec:
+      module: console
+
+# One name per machine role. The whole block is what this example exists to
+# define: no other manifest in the gallery declares it, and a field with no
+# example exercising it does not exist (AGENTS.md).
+#
+# `depends:` names PACKAGES, not component names -- `porter-example-suite-api`,
+# not `api`. That is the opposite of `after:`, which names components, and the
+# difference is not an inconsistency: `after:` is translated into systemd's
+# vocabulary by porter, while `Depends:` is handed to dpkg verbatim and dpkg
+# has only ever known package names. `porter.spec` refuses a name no component
+# in this manifest provides -- otherwise the .deb builds at rc=0 and
+# `apt install` fails with unmet dependencies on the airgapped client, which is
+# the last place anyone can do anything about it.
+#
+# Rule 11 -- `Depends:` is derived from `ldd`, never hand-written -- is about
+# SHARED LIBRARIES, and is not in tension with this. A porter package depends on
+# libraries it can discover and on sibling packages the project declares; there
+# is nothing to derive a machine role from, because a role is a deployment
+# decision and not a property of any binary.
+#
+# No version constraints. Every component in a role ships on the same USB at
+# the same version, so `(= 1.0)` would add a way for the build to be wrong and
+# no way for it to be more right; and pinning would make the metapackage
+# un-upgradeable in place, which is the one thing it must not be.
+metapackages:
+  - package: porter-example-suite-technical
+    description: porter's example suite -- everything the technical machine runs
+    depends:
+      - porter-example-suite-api
+      - porter-example-suite-sweep
+      - porter-example-suite-console
+
+  - package: porter-example-suite-corporate
+    description: porter's example suite -- everything the corporate machine runs
+    depends:
+      - porter-example-suite-desk
+      - porter-example-suite-console
+
+# A note on `Architecture:`, which the metapackages above do not declare and do
+# not inherit from the top of this file. A metapackage has no payload, so it is
+# `all` -- architecture-independent -- and porter defaults it there. Inheriting
+# `amd64` would mean the one package on the USB with no binaries in it is the
+# one that cannot be installed on an arm64 client. An entry may still say
+# `architecture: amd64` explicitly if a project wants the role pinned.
