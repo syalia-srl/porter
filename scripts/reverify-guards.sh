@@ -881,10 +881,20 @@ check "T5 the apt sources entry is removed on the way out (unsigned)" src/porter
 # The signed template's own trap, which the entry above used to reach by
 # accident and now cannot. It removes two files, and a client that keeps either
 # has an `apt-get update` that fails for good on a stick that is gone.
+#
+# Scoped to tests/test_signing.py, and that test did not exist until this entry
+# was written: the first run of it reported "guard removed and suite STAYED
+# GREEN" against tests/test_repo.py, because test_repo.py's residue test builds
+# an UNSIGNED tree and nothing anywhere installed from a signed one and then
+# looked at what was left. The entry was right and the coverage was missing.
+#
+# TRAP 4, stated rather than glossed: the trap is one line removing two files,
+# so the test's source check fires first and the keyring assertion below it is
+# never what goes red. It is there for the day the two are separated.
 check "T5 the apt sources entry AND the keyring are removed on the way out (signed)" \
   src/porter/repo.py \
   's = s.replace("trap '"'"'rm -f \"$LIST\" \"$KEYRING\"'"'"' EXIT", "trap '"'"'true'"'"' EXIT")' \
-  tests/test_repo.py
+  tests/test_signing.py
 # The re-exec must not eat the caller's argv. Parsing the flags before lifting
 # to root -- the obvious order -- consumes them all, so the deployer who asked
 # for `--version 1.0` silently gets 2.0, at rc=0.
@@ -1174,8 +1184,20 @@ check "T6 CONTROL the isolation probe detects a container with a network" src/po
 # remained" mean anything. Point the probe at a path that does not exist and it
 # reports a clean client either way -- the blind probe the count exists to
 # detect.
+# This one was INERT as well as drifted, and the SKIP is what hid it. The old
+# pattern replaced only `/etc/apt/sources.list` and left `/etc/apt/sources.list.d/*`
+# in the same `cat`, so the probe went on counting exactly what it counted
+# before. Measured 2026-08-08 inside porter-test-client:bookworm: sources.list
+# does not exist there (0 matches) and all 4 network sources are in
+# sources.list.d/debian.sources -- so the mutation removed a path the probe was
+# reading nothing from. Trap 2, in the entry whose whole job is to prove a
+# control can fail.
+#
+# It now replaces the entire cat, which really does blind the probe: red on
+# test_gate_passes_a_good_bundle and on the state-eater, both via the
+# NETSRC_BEFORE >= 1 check. The guard was always fine; the entry was not.
 check "T6 CONTROL a blind apt-source probe is not read as a clean client" src/porter/gate.py \
-  's = s.replace("# repo the same way, so that goes too.\necho \"NETSRC_BEFORE=$(cat /etc/apt/sources.list ", "# repo the same way, so that goes too.\necho \"NETSRC_BEFORE=$(cat /nonexistent ")' \
+  's = s.replace("# repo the same way, so that goes too.\necho \"NETSRC_BEFORE=$(cat /etc/apt/sources.list /etc/apt/sources.list.d/* 2>/dev/null | grep -cE '"'"'https?://'"'"')\"", "# repo the same way, so that goes too.\necho \"NETSRC_BEFORE=$(cat /nonexistent 2>/dev/null | grep -cE '"'"'https?://'"'"')\"")' \
   tests/test_gate.py
 # The install is bounded by `timeout`, and a hang is the failure that matters
 # most on an airgapped client -- at 3am it is indistinguishable from an install

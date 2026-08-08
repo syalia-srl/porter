@@ -268,6 +268,43 @@ def test_a_signed_repo_installs_offline_through_the_shipped_key(
 
 
 @pytest.mark.docker
+def test_a_signed_install_leaves_the_clients_apt_and_keyrings_as_it_found_them(
+        one_deb, tmp_path, docker_image, gpg_home):
+    """GUARD, and the signed twin of test_repo.py's unsigned one.
+
+    TRUST_SIGNED removes TWO files on the way out where TRUST_UNSIGNED removes
+    one, and until this existed only the one was covered: the registry entry for
+    the signed trap reported "guard removed and suite STAYED GREEN", because
+    nothing anywhere installed from a signed tree and then looked at what was
+    left behind.
+
+    Both matter on the same machine. The sources entry points at `file:` on a
+    stick that gets unplugged, so every later `apt-get update` fails for good on
+    a client nobody can ssh into; the keyring names the key of a repository that
+    client will never see again. `apt-get update` at the end is the half that
+    actually broke, asserted rather than inferred from the two `test !`s.
+    """
+    usb = usb_tree(one_deb, tmp_path / "usb", app="demo-app", readme="x",
+                   sign_key=KEY_UID, gpg_home=gpg_home)
+    script = (
+        "set -e;" + NO_NETWORK_SOURCES +
+        "bash /media/usb/install.sh >/dev/null;"
+        "dpkg-query -W -f='${Version}' demo-app;"
+        "test ! -e /etc/apt/sources.list.d/demo-app.list "
+        "|| { echo ' LEFTOVER-SOURCE'; exit 3; };"
+        # The INSTALLED path, which is /etc/apt/keyrings/<app>.gpg -- not
+        # KEYRING_NAME, which is what the key is called inside the repo dir on
+        # the stick. Asserting the wrong one would pass no matter what.
+        "test ! -e /etc/apt/keyrings/demo-app.gpg "
+        "|| { echo ' LEFTOVER-KEYRING'; exit 4; };"
+        "apt-get update -qq >/dev/null 2>&1 || { echo ' APT-BROKEN'; exit 5; }"
+    )
+    proc = _run(docker_image, usb, script)
+    assert proc.returncode == 0, proc.stdout + proc.stderr
+    assert proc.stdout.strip() == "1.0", proc.stdout
+
+
+@pytest.mark.docker
 @pytest.mark.parametrize("signed", [False, True])
 def test_a_package_with_a_flipped_byte_is_rejected_in_either_mode(
         one_deb, tmp_path, docker_image, gpg_home, signed):
