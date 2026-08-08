@@ -98,6 +98,9 @@ class Component:
     version: str = "1.0"
     architecture: str = "amd64"
     maintainer: str = "porter <porter@example.com>"
+    # Declared last because a component acquires them last: a migration exists
+    # only once there is a previous version to migrate *from*. See porter.migrate.
+    migrations: list[Migration] = field(default_factory=list)
 
     @classmethod
     def from_manifest(cls, manifest: dict) -> tuple[Component, Python]:
@@ -138,7 +141,36 @@ class Component:
                 version=str(manifest["version"]),
                 architecture=manifest["architecture"],
                 maintainer=manifest["maintainer"],
+                migrations=[
+                    Migration(before_version=str(m["before_version"]),
+                              script=m["script"])
+                    for m in manifest.get("migrations", [])
+                ],
             ),
             Python(version=str(py.get("version", "3.12")),
                    package=py.get("package", "bundled")),
         )
+
+@dataclass(frozen=True)
+class Migration:
+    """One state migration, and the upgrade it fires on.
+
+    Defined at the end of this file rather than beside `Component` for a
+    mechanical reason worth writing down: three implementers shared this
+    checkout on 2026-08-08, and a new dataclass wedged between the existing
+    ones is a diff hunk that overlaps a peer's. The class is small and its
+    reader arrives here from `Component.migrations` either way.
+
+    `before_version` is the version the migration must run *before* -- normally
+    the version of the package that carries it. `script` is `sh` text, spliced
+    into the postinst rather than shipped as a file: a migration that is a path
+    is a migration that can fail to be staged, and that failure looks exactly
+    like an install with nothing to migrate.
+
+    There is no `id` and no stamp file. dpkg's `$2` already says which version
+    the client is coming from, and a stamp would live in `/var/lib/<pkg>/`,
+    which rule 6 says the package never writes to.
+    """
+
+    before_version: str
+    script: str

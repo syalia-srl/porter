@@ -1,0 +1,68 @@
+# The gallery's migration entry: a service with client-owned state, at the
+# version that migrates it.
+#
+# This directory carries TWO manifests on purpose. `porter-previous.yaml` is
+# what this file was one release ago -- version 1.9, payload `app_v1.py`, no
+# `migrations:` block -- and the difference between the two IS the upgrade the
+# example is about, readable without opening a test. tests/test_migrate_e2e.py
+# builds both, installs 1.9, lets a client create real state with it, and
+# upgrades.
+#
+# The version numbers are 1.9 -> 1.10 -> 1.11 and that is not decoration.
+# `[ "1.9" \< "1.10" ]` is FALSE in the shell -- '9' sorts after '1' -- so a
+# migration gated on a string comparison would skip the one upgrade that needs
+# it and report success. `dpkg --compare-versions` gets it right, and these
+# numbers are what makes the difference observable.
+
+package: stateful-demo
+version: "1.10"
+description: porter's example service with client-owned state and a migration
+maintainer: porter <porter@example.com>
+architecture: amd64
+
+kind: service
+
+# app.py is the payload; migrate_v2.py is run by the postinst and never by the
+# service. Both are staged under their own basename in /usr/lib/stateful-demo/,
+# which is the unit's WorkingDirectory.
+source:
+  - src/app.py
+  - src/migrate_v2.py
+
+# No requirements: the payload is stdlib only. That is deliberate for an example
+# whose subject is upgrades -- a third-party dependency would put a second
+# variable in every measurement about what did or did not run.
+python:
+  version: "3.12"
+  package: bundled
+
+requirements: []
+
+exec:
+  module: app
+  args: []
+
+env:
+  PORT: "9010"
+  # The client's own data lives here. The PACKAGE never writes to it (rule 6);
+  # the service and the migration do, at run time, on the client.
+  STATE_DIR: /var/lib/stateful-demo
+  GREETING: ""
+
+admin_keys:
+  - GREETING
+
+# The migration, and the only place a version appears twice. `before_version` is
+# this package's own version: every client below 1.10 needs it, every client at
+# or above it has already had it. dpkg decides which by handing the postinst the
+# previously-configured version as $2, so no stamp file is needed and none is
+# written -- /var/lib/<pkg>/ is the client's (rule 6).
+#
+# The script runs the VENDORED interpreter by its installed path. An airgapped
+# client has no other Python, which is also why a migration written in Python is
+# viable here at all.
+migrations:
+  - before_version: "1.10"
+    script: |
+      /usr/lib/stateful-demo/python/bin/python3.12 \
+        /usr/lib/stateful-demo/migrate_v2.py /var/lib/stateful-demo/state.json

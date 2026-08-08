@@ -1,0 +1,42 @@
+# stateful-demo 1.9 -- what porter.yaml was one release ago.
+#
+# Kept, and kept buildable, because "the migration ran exactly once on the
+# upgrade" is not a claim a single package can support. Something has to have
+# been installed first, and it has to have been a REAL package that a client
+# could really configure and really produce state with: a hand-written state
+# file would prove that the migration transforms bytes, not that it transforms
+# the bytes an earlier version of this service actually wrote.
+#
+# Every difference from porter.yaml is a difference the upgrade is about:
+#   version:      1.9, which dpkg orders BELOW 1.10 (the shell does not)
+#   source/exec:  app_v1.py, which writes schema 1 -- `notes` are bare strings
+#   migrations:   absent. There was nothing before 1.9 to migrate from.
+
+package: stateful-demo
+version: "1.9"
+description: porter's example service with client-owned state and a migration
+maintainer: porter <porter@example.com>
+architecture: amd64
+
+kind: service
+
+source:
+  - src/app_v1.py
+
+python:
+  version: "3.12"
+  package: bundled
+
+requirements: []
+
+exec:
+  module: app_v1
+  args: []
+
+env:
+  PORT: "9010"
+  STATE_DIR: /var/lib/stateful-demo
+  GREETING: ""
+
+admin_keys:
+  - GREETING

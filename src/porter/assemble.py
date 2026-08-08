@@ -43,7 +43,7 @@ import subprocess
 from dataclasses import dataclass
 from pathlib import Path
 
-from porter.config import env_postinst, split
+from porter.config import env_postinst, setup_script, split
 from porter.interpreter import install, vendor
 from porter.systemd import unit
 from porter.types import Component, Python
@@ -95,6 +95,9 @@ def _refuse_what_porter_cannot_emit(component: Component, python: Python) -> Non
       and the wrapper does not source `/etc/<pkg>/defaults`, so the shipped half
       would be inert. Both are decisions the gallery has not made.
     - **A command with no `bin_name`.** There is no name to install under.
+    - **A command declaring `migrations:`.** The command branch emits no
+      postinst, so dpkg would have nothing to call them from: the upgrade would
+      succeed at rc=0 having migrated nothing.
     """
     if component.kind == "oneshot":
         raise ValueError(
@@ -126,6 +129,14 @@ def _refuse_what_porter_cannot_emit(component: Component, python: Python) -> Non
                 "/etc/<pkg>/env at 600 root:root, unreadable by the operator running "
                 "the command, and the wrapper sources nothing -- the shipped defaults "
                 "would be inert. Add examples/command first"
+            )
+        if component.migrations:
+            raise ValueError(
+                f"a 'command' component may not declare migrations: "
+                f"{len(component.migrations)} declared. The command branch below "
+                "emits no postinst at all, so dpkg would never call them -- the "
+                "package would upgrade at rc=0 having migrated nothing, which is "
+                "exactly the silence porter.migrate exists to end"
             )
 
 
@@ -426,9 +437,26 @@ def assemble(component: Component, python: Python,
         units.mkdir(parents=True)
         (units / f"{pkg}.service").write_text(
             unit(pkg, component.description, exec_start, workdir))
+        # The interactive half of rule 5, and only when there is something to
+        # ask: postinst leaves /etc/<pkg>/env holding the right keys and no
+        # values, and this is where a human fills them in. `setup_script`
+        # refuses a component with no admin_keys, so the condition here and the
+        # refusal there are the same predicate written twice on purpose -- the
+        # one that would otherwise go wrong is silent, a package that ships a
+        # wizard prompting for nothing.
+        if component.admin_keys:
+            setup = stage / "usr/bin" / f"{pkg}-setup"
+            setup.parent.mkdir(parents=True, exist_ok=True)
+            setup.write_text(setup_script(component))
+            setup.chmod(0o755)  # dpkg preserves the mode; without it, not runnable
         # Creates the static system user the unit's User= names, and the admin's
-        # env file. Both are why a service always ships one.
-        scripts["postinst"] = env_postinst(pkg)
+        # env file. Both are why a service always ships one. `migrations` reaches
+        # the client through here and nowhere else: a manifest that declares one
+        # and an emitter that drops it is an upgrade that silently does not
+        # migrate, which is the whole failure this task exists to close.
+        scripts["postinst"] = env_postinst(
+            pkg, migrations=component.migrations,
+            has_setup=bool(component.admin_keys))
     else:  # command -- no unit, no user, no config; see the refusal above
         bindir = stage / "usr/bin"
         bindir.mkdir(parents=True)
