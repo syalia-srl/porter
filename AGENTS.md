@@ -245,8 +245,11 @@ clean tree. `find src tests -name __pycache__ -type d -exec rm -rf {} +`.
   Each builds from a clean tree. `examples/command` is still owed.
 - **156 tests, 67 guard entries.** Run `scripts/reverify-guards.sh` before a
   release; it isolates itself in a worktree and takes ~9 minutes.
-- **Next:** the wave fix round (a freshly installed timer does not arm until
-  reboot; generated shell is never syntax-checked), then Tasks 5–8 and 12–15.
+- **Tasks 5–8 and 12 done:** the USB apt repo and autonomous `install.sh`, the
+  Docker gate with mutation bundles, `Depends:` from ELF headers, the
+  `<app>-desktop` split, and the `build:` escape hatch. Nine examples build.
+- **Next:** Tasks 13 (shared interpreter, native binaries), 14 (nspawn gate,
+  repo signing) and 15 (release).
 
 - **Next:** the nspawn gate, which is where the emitted unit is
   finally *started* by systemd. Nothing so far has run one. What *is* exercised:

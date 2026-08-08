@@ -188,7 +188,7 @@ def test_refuses_an_unknown_key_in_the_exec_block(tmp_path, suite_doc):
 
 @pytest.mark.parametrize("missing", ["package", "description", "kind", "exec"])
 def test_refuses_a_component_missing_a_required_key(tmp_path, suite_doc, missing):
-    """Without this, `from_manifest` raises `KeyError('kind')` -- a traceback
+    """Without this, `from_manifest` fails deep in assembly -- a traceback
     whose entire message is the word the adopter did not type, with no manifest
     path and no component name in it."""
     suite_doc["components"][0].pop(missing)

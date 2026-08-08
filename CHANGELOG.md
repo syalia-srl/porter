@@ -76,6 +76,13 @@ Named, not omitted:
   refused by name because nothing yet knows where a shared one would install.
   `examples/command` is also still owed — the kind is implemented and tested,
   but the gallery entry that would define its manifest shape does not exist.
+- **`sh -n` covers the shell porter *generates*, not shell it ships.** Maintainer
+  scripts and `<pkg>-setup` are syntax-checked at build time, and an `admin_keys`
+  entry that is not a valid shell identifier is refused. But a conffile that a
+  shipped tool `source`s is not checked: an unquoted apostrophe in a component
+  description produced a clean rc=0 build and install, then rc=2 at runtime
+  (found 2026-08-08 writing `examples/custom-build`). Guessing which `/etc` files
+  a payload sources is the wrong fix; the claim is simply narrower than it reads.
 - **`sudo -n` refuses rather than prompting**, by choice: a hidden password prompt
   in an unattended run is indistinguishable from a hang.
 - **The 2 GB figure is synthetic** — `/dev/urandom` payloads, not a real image.
