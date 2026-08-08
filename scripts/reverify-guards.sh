@@ -24,7 +24,27 @@
 # The trailing re-run is the control: if the suite is not green after restore,
 # the harness itself is dirty and no verdict above it means anything.
 set -uo pipefail
-cd "$(dirname "$0")/.." || exit 2
+REPO="$(cd "$(dirname "$0")/.." && pwd)"
+
+# Run in a DETACHED WORKTREE, never the shared checkout.
+#
+# This script edits source files in place. porter's checkout is shared with peer
+# agents, and on 2026-08-08 a reviewer found this running mid-mutation while it
+# was reading the tree -- it had to verify in its own worktree to get an honest
+# answer. A mutation harness that can make a concurrent reviewer read a mutant is
+# worse than no harness.
+#
+# PORTER_GUARDS_INPLACE=1 opts out (CI, where the checkout is nobody else's).
+if [ "${PORTER_GUARDS_INPLACE:-0}" != 1 ]; then
+  WT="$(mktemp -d)/guards"
+  git -C "$REPO" worktree add --detach -q "$WT" HEAD || { echo "ABORT: cannot create worktree"; exit 2; }
+  trap 'git -C "$REPO" worktree remove --force "$WT" >/dev/null 2>&1; rm -rf "$(dirname "$WT")"' EXIT
+  echo "  isolated in $WT ($(git -C "$WT" rev-parse --short HEAD))"
+  cd "$WT" || exit 2
+else
+  echo "  IN-PLACE in $REPO — only safe when no peer shares this checkout"
+  cd "$REPO" || exit 2
+fi
 purge() { find src tests -name __pycache__ -type d -exec rm -rf {} + 2>/dev/null; true; }
 # All three gates armed. A skipped test is green, and a green run here would be
 # read as "the guard still bites" when in fact nothing ran -- the same silence

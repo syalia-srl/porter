@@ -53,6 +53,12 @@ jobs:
       # and the suite must go red. A guard whose test cannot fail licenses
       # shipping. This is slower than the suite it wraps -- that is the point.
       - name: Guards still bite
+        # In-place is correct here and only here: the runner's checkout is
+        # nobody else's, and actions/checkout's shallow clone makes worktrees a
+        # needless complication. Locally the script isolates itself, because
+        # porter's checkout is shared with peer agents.
+        env:
+          PORTER_GUARDS_INPLACE: "1"
         run: bash scripts/reverify-guards.sh
 
       # Advisory, not a gate: three pre-existing findings predate this workflow
