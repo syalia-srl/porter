@@ -80,6 +80,25 @@ allowlist; only removing **both** reproduced the original rc=0 build.
 Report that plainly. An implementer who glosses it leaves the next reader
 believing a single guard is load-bearing when it is not.
 
+## Trap 5 — testing the test harness with the test harness
+
+A test whose *subject* is pytest's control flow cannot use pytest's control flow
+as its assertion mechanism.
+
+Measured 2026-08-08 in Task 3: a test asserting that `PORTER_REQUIRE_SYSTEMD`
+turns a skip into a failure used `pytest.raises(pytest.fail.Exception)`. That
+does not catch `Skipped` — so under mutation the skip propagated, pytest marked
+*that test* skipped, and the run was green and silent. The arming test failed to
+notice the variable had been disarmed, which is the exact failure the variable
+exists to prevent.
+
+Use an explicit outcome helper that inspects the result, not an exception matcher
+that happens to share a base class with the thing you are measuring.
+
+The general form: **when the thing under test is the mechanism you would normally
+assert with, you need a second, independent mechanism.** Same reason a positive
+control must not share a failure mode with the thing it controls.
+
 ## Reviewing someone else's evidence
 
 Ask of each mutation:

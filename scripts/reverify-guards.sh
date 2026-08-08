@@ -96,6 +96,16 @@ check "T3 PORTER_REQUIRE_SYSTEMD arms the systemd-analyze skip" tests/conftest.p
   's = s.replace("PORTER_REQUIRE_SYSTEMD\", \"\"", "PORTER_REQUIRE_SYSTEMD_OFF\", \"\"")' \
   tests/test_config.py
 
+echo "════ Task 3 — guards verified once by hand and, until now, on no run ════"
+check "T3 split: admin keys are excluded from defaults" src/porter/config.py \
+  's = s.replace("if k not in admin_keys", "if True")' tests/test_config.py
+check "T3 postinst creates env only when absent" src/porter/config.py \
+  's = s.replace("if [ ! -f /etc/{pkg}/env ]; then", "if true; then")' tests/
+check "T3 env is chmod 600" src/porter/config.py \
+  's = s.replace("chmod 600", "chmod 644")' tests/
+check "T3 admin env is read, and read last" src/porter/systemd.py \
+  's = s.replace("EnvironmentFile=-/etc/{pkg}/env", "EnvironmentFile=/etc/{pkg}/defaults")' tests/test_config.py
+
 echo
 echo "════ control: suite green again after every restore ════"
 purge; final=$(run); echo "  restored rc=$final"
