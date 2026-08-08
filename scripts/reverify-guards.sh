@@ -127,13 +127,18 @@ check "T3 admin env is read, and read last" src/porter/systemd.py \
   's = s.replace("EnvironmentFile=-/etc/{pkg}/env", "EnvironmentFile=/etc/{pkg}/defaults")' tests/test_config.py
 
 echo "════ Task 4 — assemble ════"
-# `oneshot` is refused BY NAME purely to say why and what unblocks it. Trap 4:
-# the generic SUPPORTED_KINDS check below refuses it too, so removing this alone
-# does not let a oneshot through -- what it loses is the message. The test
-# therefore matches "oneshot-timer", which only this branch emits.
-check "T4 oneshot is refused by name, with the reason (MESSAGE ONLY -- see Trap 4)" \
-  src/porter/assemble.py \
-  's = s.replace("if component.kind == \"oneshot\":", "if False:")' tests/test_assemble.py
+# RETIRED by Task 11: "T4 oneshot is refused by name". Its subject -- the
+# refusal branch in assemble -- no longer exists, because `oneshot` is emitted
+# now. Deleting it was not optional and not cosmetic: `str.replace` is a
+# SUBSTRING match, so the retired pattern `if component.kind == "oneshot":`
+# still matched, but it matched Task 11's `.timer` branch instead, disabled
+# that, and scoped the run to tests/test_assemble.py -- which does not test
+# timers. Measured 2026-08-08: the entry reported
+#   FAIL ... guard removed and suite STAYED GREEN
+# on a codebase whose guards were all fine. A stale entry does not go quiet
+# when its subject disappears; it drifts onto whatever line it still matches.
+# "T11 a oneshot ships a .timer" is the live guard for that branch.
+#
 # This one is a real refusal, and nothing else catches it: with it gone,
 # `kind: sevice` falls through to the command branch and assemble RETURNS a
 # staged wrapper at rc=0 for a component that asked for a unit.
@@ -389,28 +394,11 @@ check "T10 an empty answer keeps the current value" src/porter/config.py \
   's = s.replace("[ -n \"$new\" ] || new=$cur", ":")' tests/test_migrate_e2e.py
 
 echo "════ Task 11 ════"
-# Task 11 -- multi-service ordering, and `oneshot`. Guard entries to be merged
-# into scripts/reverify-guards.sh by the controller (this wave's protocol keeps
-# three implementers out of that one file).
+# Task 11 -- multi-service ordering, and `oneshot`.
 #
-# ############################################################################
-# FIRST, A DELETION. The existing entry
-#
-#   check "T4 oneshot is refused by name, with the reason (MESSAGE ONLY -- see Trap 4)" \
-#     src/porter/assemble.py \
-#     's = s.replace("if component.kind == \"oneshot\":", "if False:")' tests/test_assemble.py
-#
-# must be REMOVED. The branch it mutates no longer exists: `oneshot` is emitted
-# now, not refused, so that entry can only ever report SKIP ("pattern did not
-# match") -- which the harness counts as a failure and which would make every
-# release gate red for a guard that was deliberately retired. Its replacements
-# are "T11 a oneshot gets Type=oneshot" and the three below it, which pin the
-# behaviour that made the refusal correct in the first place.
-#
-# tests/test_assemble.py's `test_refuses_a_oneshot_it_could_only_ship_as_a_restarting_service`
-# is Task 4's and is now obsolete for the same reason; it is left to the
-# controller to delete, since that file is not Task 11's to edit.
-# ############################################################################
+# The Task 4 entry "oneshot is refused by name" was retired as part of this
+# task; see the note where it used to be, under Task 4 above. Its companion
+# test in tests/test_assemble.py went with it.
 echo "════ Task 11 — ordering: the directives ════"
 # Removed, a multi-component project builds at rc=0 with every unit carrying
 # `After=network.target` and nothing else: the graph is read from the manifest,
