@@ -171,6 +171,51 @@ def _lint(stage: Path, conffiles: Sequence[str] = ()) -> None:
             raise ValueError(f"stage carries a symlink escaping the stage: {p} -> {target}")
 
 
+def _refuse_generated_shell_that_does_not_parse(
+        stage: Path, scripts: dict[str, str]) -> None:
+    """Every script porter generated must parse, and `sh` is what decides.
+
+    Nothing here ran `sh -n` on anything until 2026-08-08, and until Task 10 it
+    did not need to: porter's maintainer scripts were built wholly from fixed
+    strings and always parsed. They no longer are. A manifest's
+    `migrations: script:` is spliced into the postinst verbatim, and
+    `<pkg>-setup` interpolates `admin_keys` into shell text. So an unbalanced
+    quote in `porter.yaml` produced a .deb that BUILT, linted and installed at
+    rc=0 and died on the client with `subprocess installed post-installation
+    script returned error exit status 2` -- porter's characteristic bug, newly
+    reachable from the manifest and reported by the Task 10 review.
+
+    `usr/bin/` is read for the same reason and no other: porter writes every
+    file it puts there (the `command` wrapper, `<pkg>-setup`) and nothing else
+    does -- `source:` lands in `/usr/lib/<pkg>`, `data:` in `/usr/share/<pkg>`.
+    A payload's own shell scripts are the adopter's and are not read here.
+
+    A syntax error is all this catches. `MY-KEY_value=$new` parses perfectly and
+    is a *command* named `MY-KEY_value`, which fails at run time and nowhere
+    else -- see `assemble._refuse_what_porter_cannot_emit` for the refusal that
+    covers that half.
+    """
+    candidates = [(f"maintainer script {name}", body)
+                  for name, body in sorted(scripts.items())]
+    for path in sorted((stage / "usr/bin").glob("*")):
+        if path.is_symlink() or not path.is_file():
+            continue
+        body = path.read_bytes().decode("utf-8", errors="replace")
+        if body.startswith("#!/bin/sh"):
+            candidates.append((f"/usr/bin/{path.name}", body))
+    for label, body in candidates:
+        # Read from stdin rather than written to a file: this runs before
+        # DEBIAN/ exists and must leave nothing behind on a refusal.
+        probe = subprocess.run(["sh", "-n"], input=body,
+                               capture_output=True, text=True)
+        if probe.returncode != 0:
+            raise ValueError(
+                f"{label} is not valid sh: {probe.stderr.strip()}. dpkg-deb "
+                "packages it, dpkg installs it, and it fails on the client -- "
+                "the build is the last place this is visible"
+            )
+
+
 def _control_field(key: str, value: str) -> str:
     """One control field, with a multi-line value folded Debian-style.
 
@@ -196,6 +241,7 @@ def build_deb(stage: Path, control: dict[str, str], out_dir: Path,
     """
     stage, out_dir = Path(stage), Path(out_dir)
     _lint(stage, conffiles)
+    _refuse_generated_shell_that_does_not_parse(stage, scripts or {})
 
     # Built fresh, and removed whatever the call's outcome. Both halves matter:
     # reusing an existing DEBIAN/ means a call that passes no scripts= and no

@@ -145,6 +145,80 @@ def test_maintainer_scripts_are_shipped_executable(tmp_path):
     assert tar.extractfile("./postinst").read().decode() == "#!/bin/sh\nexit 0\n"
 
 
+# A migration script as it arrives from porter.yaml, with one quote missing.
+# `porter.migrate` splices `script:` into the postinst verbatim, so this is what
+# an adopter's typo looks like by the time it reaches build_deb.
+BROKEN_MIGRATION_POSTINST = '''#!/bin/sh
+set -e
+if [ "$1" = configure ]; then
+  if [ -n "$2" ]; then
+    (
+      echo "migrating from $2
+    )
+  fi
+fi
+exit 0
+'''
+
+
+def test_a_maintainer_script_that_does_not_parse_is_refused(tmp_path):
+    """The build is the last place an unparseable postinst is visible.
+
+    Until Task 10, porter's maintainer scripts were built wholly from fixed
+    strings and always parsed. `migrations: script:` is spliced in verbatim
+    now, so one missing quote in porter.yaml produced a .deb that BUILT, linted
+    and installed at rc=0 and then died on the client -- `subprocess installed
+    post-installation script returned error exit status 2`, on a machine with no
+    network and nobody watching.
+
+    The positive control is the second half and it carries the test: the
+    identical stage with a script that DOES parse must build. Without it, a
+    refusal that fired on every input would satisfy the first assertion just as
+    well.
+    """
+    with pytest.raises(ValueError, match="not valid sh"):
+        build_deb(_stage(tmp_path), CONTROL, tmp_path, conffiles=CONFFILES,
+                  scripts={"postinst": BROKEN_MIGRATION_POSTINST})
+    good = BROKEN_MIGRATION_POSTINST.replace('from $2', 'from $2"')
+    deb = build_deb(_stage(tmp_path / "ok"), CONTROL, tmp_path / "out",
+                    conffiles=CONFFILES, scripts={"postinst": good})
+    assert deb.exists()
+
+
+def test_the_refusal_names_the_script_that_does_not_parse(tmp_path):
+    """`postinst`, `prerm` and `postrm` fail identically on the client and the
+    message is the only thing that says which one to look at."""
+    with pytest.raises(ValueError, match="prerm"):
+        build_deb(_stage(tmp_path), CONTROL, tmp_path, conffiles=CONFFILES,
+                  scripts={"postinst": "#!/bin/sh\nexit 0\n",
+                           "prerm": "#!/bin/sh\ncase $1 in\n"})
+
+
+def test_a_generated_script_in_usr_bin_that_does_not_parse_is_refused(tmp_path):
+    """`/usr/bin/<pkg>-setup` is not a maintainer script and fails the same way.
+
+    porter writes every file it puts in /usr/bin -- the `command` wrapper and
+    `<pkg>-setup` -- and both interpolate manifest text. dpkg-deb packages an
+    unparseable one happily; the operator finds out when they run it, which for
+    a setup wizard is the moment the client is being commissioned.
+
+    The control is the third stage: the same directory with a script that parses
+    must still build, or this refusal is just "no /usr/bin allowed".
+    """
+    stage = _stage(tmp_path)
+    (stage / "usr/bin").mkdir(parents=True)
+    (stage / "usr/bin/demo-app-setup").write_text(
+        '#!/bin/sh\nprintf \'GREETING [%s]: \' "$cur\nread new\n')
+    with pytest.raises(ValueError, match="/usr/bin/demo-app-setup"):
+        build_deb(stage, CONTROL, tmp_path, conffiles=CONFFILES)
+
+    ok = _stage(tmp_path / "ok")
+    (ok / "usr/bin").mkdir(parents=True)
+    (ok / "usr/bin/demo-app-setup").write_text(
+        '#!/bin/sh\nprintf \'GREETING [%s]: \' "$cur"\nread new\n')
+    assert build_deb(ok, CONTROL, tmp_path / "out", conffiles=CONFFILES).exists()
+
+
 def test_the_stage_is_left_without_the_build_scaffolding(tmp_path):
     """DEBIAN/ is build scaffolding, not payload. Leaving it behind makes a
     second build of the same stage lint a tree it did not stage."""
