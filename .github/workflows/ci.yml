@@ -40,12 +40,30 @@ env:
   PORTER_REQUIRE_NSPAWN: "1"
 
 jobs:
+  # The whole guard registry, applied in memory: every entry's mutation must
+  # still match its use site and must not rewrite more lines than its allowance.
+  # It runs no tests and needs no uv, so it costs seconds -- and it catches the
+  # entire class the sharded job below would otherwise spend half an hour
+  # reporting as SKIP. A pattern that stopped matching is a guard that is no
+  # longer checked, which is indistinguishable from deleting it.
+  #
+  # It gates the shards deliberately: a dead pattern means the registry is wrong
+  # about the code, and there is no sense burning six runners to find that out.
+  guard-patterns:
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    steps:
+      - uses: actions/checkout@v4
+      - name: Every guard entry still matches its use site
+        env:
+          PORTER_GUARDS_INPLACE: "1"
+        run: bash scripts/reverify-guards.sh --check-patterns
+
   tests:
     runs-on: ubuntu-latest
-    # Raised for the nspawn gate: three systemd boots and a 97 MB package in the
-    # suite, and the same again inside `reverify-guards.sh` for each of the eight
-    # entries whose scope is tests/test_nspawn_gate.py.
-    timeout-minutes: 60
+    # The suite alone now: three systemd boots and a 97 MB package. The guard
+    # registry moved to its own sharded job, which is where the hour used to go.
+    timeout-minutes: 30
     steps:
       - uses: actions/checkout@v4
 
@@ -82,23 +100,73 @@ jobs:
       - name: Test suite
         run: uv run --extra dev pytest -v --durations=10
 
-      # The gate that matters: every guard is disabled at its use site in turn
-      # and the suite must go red. A guard whose test cannot fail licenses
-      # shipping. This is slower than the suite it wraps -- that is the point.
-      - name: Guards still bite
-        # In-place is correct here and only here: the runner's checkout is
-        # nobody else's, and actions/checkout's shallow clone makes worktrees a
-        # needless complication. Locally the script isolates itself, because
-        # porter's checkout is shared with peer agents.
-        env:
-          PORTER_GUARDS_INPLACE: "1"
-        run: bash scripts/reverify-guards.sh
-
       # Advisory, not a gate: three pre-existing findings predate this workflow
       # and nobody has decided them. Deliberately not silenced either -- the
       # output lands in the log so the decision stays visible.
       - name: Lint (advisory)
         run: uv run --extra dev ruff check . || true
+
+  # The gate that matters: every guard is disabled at its use site in turn and
+  # its tests must go red. A guard whose test cannot fail licenses shipping.
+  #
+  # Sharded because it could not be run otherwise. 167 entries in one process
+  # measured 4111 seconds -- over an hour, and it timed out before reaching the
+  # end. Six shards bring the slowest to about 14 minutes on a developer machine
+  # (predicted 852/857/850/852/854/854s), which fits a runner even at the 1.5x a
+  # hosted runner costs over that machine.
+  #
+  # Each shard is a COMPLETE run of the protocol over its own subset: it takes
+  # its own per-scope baseline before the first entry in that scope, does the
+  # full mutate -> purge -> run -> restore -> purge cycle for every entry it
+  # owns, and re-runs every scope it touched at the end as the restore control.
+  # Nothing is sampled and nothing is capped; the assignment is a partition,
+  # asserted entry-by-entry, and an entry missing from it aborts the shard.
+  #
+  # fail-fast is off on purpose. One broken guard must not cancel the five
+  # shards that would have told us which OTHER guards are broken -- that is a
+  # partial answer masquerading as a complete one, and it is the same failure
+  # this whole job exists to prevent.
+  guards:
+    needs: guard-patterns
+    runs-on: ubuntu-latest
+    timeout-minutes: 40
+    strategy:
+      fail-fast: false
+      matrix:
+        shard: [1, 2, 3, 4, 5, 6]
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Install uv
+        uses: astral-sh/setup-uv@v5
+        with:
+          enable-cache: true
+
+      # Same bargain as the suite job: every PORTER_REQUIRE_* gate is armed, so
+      # a missing binary has to be a legible line here rather than a wall of
+      # failures -- or worse, a shard of skips that exits 0.
+      - name: Preconditions
+        run: |
+          set -euo pipefail
+          command -v dpkg-deb >/dev/null || { echo "dpkg-deb missing"; exit 1; }
+          command -v systemd-analyze >/dev/null || { echo "systemd-analyze missing"; exit 1; }
+          sudo apt-get update -qq
+          sudo apt-get install -y -qq systemd-container
+          command -v systemd-nspawn >/dev/null || { echo "systemd-nspawn missing"; exit 1; }
+          sudo -n true || { echo "passwordless sudo missing; nspawn gate cannot run"; exit 1; }
+          command -v cc >/dev/null || { echo "cc missing"; exit 1; }
+          docker version --format '{{.Server.Version}}'
+          df -h / | tail -1
+
+      - name: Guards still bite (shard ${{ matrix.shard }}/6)
+        # In-place is correct here and only here: the runner's checkout is
+        # nobody else's, and actions/checkout's shallow clone makes worktrees a
+        # needless complication. Locally the script isolates itself, because
+        # porter's checkout is shared with peer agents and a peer must never
+        # read a mutant.
+        env:
+          PORTER_GUARDS_INPLACE: "1"
+        run: bash scripts/reverify-guards.sh --shard ${{ matrix.shard }}/6
 
   # Proves the claim the whole design rests on: one build on the glibc floor runs
   # on every supported target. Cheap to run, and the failure it catches (a

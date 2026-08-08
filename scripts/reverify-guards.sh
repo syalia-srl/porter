@@ -23,8 +23,59 @@
 # Method: mutate -> purge -> run -> restore -> purge -> confirm green again.
 # The trailing re-run is the control: if the suite is not green after restore,
 # the harness itself is dirty and no verdict above it means anything.
+#
+# SHARDING (Task 15). 166 entries took over 50 minutes and timed out, which is
+# unrunnable locally and impossible inside CI's budget. Two changes fixed it,
+# and neither weakens an entry:
+#
+#   1. The BASELINE and the CONTROL are now per-scope instead of whole-suite.
+#      They are the same assertion made where it bites: before this shard's
+#      first entry in scope S, S must be green; after the last restore, S must
+#      be green again. A shard's verdicts only ever rest on the scopes it ran,
+#      so scoping the precondition to those scopes preserves the property
+#      exactly -- and it is strictly tighter than one full-suite baseline taken
+#      an hour before the entry that relies on it.
+#
+#   2. `--shard I/N` splits the entries across N runs that can go in parallel,
+#      each in its own worktree. Assignment is computed by parsing THIS FILE
+#      (see the python block below), bin-packed by measured per-scope cost, so
+#      no shard inherits tests/test_nspawn_gate.py's eight 168-second entries
+#      alone. Every entry lands in exactly one shard and the count is asserted;
+#      a mis-set N cannot silently drop coverage.
+#
+# `--check-patterns` is the third change and the cheapest: it applies every
+# mutation in memory and reports the ones that no longer match, or that rewrite
+# more lines than their allowance, WITHOUT running a single test. That is the
+# entire SKIP class -- a pattern that stopped matching is a guard that is no
+# longer checked -- caught in about a second instead of an hour.
 set -uo pipefail
+SELF="$(cd "$(dirname "$0")" && pwd)/$(basename "$0")"
 REPO="$(cd "$(dirname "$0")/.." && pwd)"
+
+SHARD_I=1 SHARD_N=1 PATTERNS_ONLY=0
+usage() {
+  cat <<'USAGE'
+usage: reverify-guards.sh [--shard I/N] [--check-patterns]
+
+  --shard I/N       run only shard I of N (1-indexed). Default 1/1 = everything.
+  --check-patterns  static pre-flight: assert every entry still matches and fits
+                    its allowance. Runs no tests. Seconds, not hours.
+USAGE
+}
+while [ $# -gt 0 ]; do
+  case "$1" in
+    --shard)
+      [ $# -ge 2 ] || { echo "--shard needs I/N"; exit 2; }
+      case "$2" in *[!0-9/]*|*/*/*|/*|*/) echo "bad --shard '$2'"; exit 2;; esac
+      SHARD_I=${2%%/*}; SHARD_N=${2##*/}
+      { [ "$SHARD_N" -ge 1 ] && [ "$SHARD_I" -ge 1 ] && [ "$SHARD_I" -le "$SHARD_N" ]; } \
+        || { echo "bad --shard '$2': need 1 <= I <= N"; exit 2; }
+      shift 2 ;;
+    --check-patterns) PATTERNS_ONLY=1; shift ;;
+    -h|--help) usage; exit 0 ;;
+    *) echo "unknown argument '$1'"; usage; exit 2 ;;
+  esac
+done
 
 # Run in a DETACHED WORKTREE, never the shared checkout.
 #
@@ -55,8 +106,179 @@ run()   { PORTER_REQUIRE_UV=1 PORTER_REQUIRE_DOCKER=1 PORTER_REQUIRE_SYSTEMD=1 \
             uv run --extra dev pytest -q "$@" >/tmp/rv.log 2>&1; echo $?; }
 
 fail=0
+
+# ---- the entry map ---------------------------------------------------------
+# This file is its own manifest. The python below reads it back the way bash
+# does -- backslash continuations joined, then shlex -- so the two readers
+# cannot disagree about where an entry's quoting ends. It does two jobs:
+# `--check-patterns` (apply every mutation in memory, report the dead ones) and
+# the shard assignment.
+MAPFILE=$(mktemp)
+PORTER_SELF="$SELF" PORTER_N="$SHARD_N" PORTER_PATTERNS="$PATTERNS_ONLY" \
+python3 - "$MAPFILE" <<'PY'
+import os, sys, shlex, difflib, pathlib
+
+src = pathlib.Path(os.environ["PORTER_SELF"]).read_text()
+N = int(os.environ["PORTER_N"])
+patterns_only = os.environ["PORTER_PATTERNS"] == "1"
+mapfile = pathlib.Path(sys.argv[1])
+
+joined, buf = [], ""
+for line in src.splitlines():
+    if line.rstrip().endswith("\\"):
+        buf += line.rstrip()[:-1] + " "
+    else:
+        joined.append(buf + line); buf = ""
+
+entries = []
+for line in joined:
+    if not line.startswith("check "):
+        continue
+    p = shlex.split(line)
+    entries.append(dict(label=p[1], file=p[2], expr=p[3], scope=p[4],
+                        allow=int(p[5]) if len(p) > 5 else 2))
+if not entries:
+    print("ABORT: parsed no entries out of this file", file=sys.stderr)
+    sys.exit(2)
+
+if patterns_only:
+    bad = 0
+    for e in entries:
+        orig = pathlib.Path(e["file"]).read_text()
+        s = orig
+        try:
+            exec(e["expr"])
+        except Exception as exc:                       # noqa: BLE001
+            print(f"  DEAD  {e['label']} — mutation expression raised: {exc}")
+            bad += 1; continue
+        if s == orig:
+            print(f"  DEAD  {e['label']} — pattern did not match; the file is "
+                  f"unchanged. A pattern that matches nothing is a guard that "
+                  f"is no longer checked.")
+            bad += 1; continue
+        changed = sum(1 for l in difflib.ndiff(orig.splitlines(), s.splitlines())
+                      if l[0] in "+-")
+        if changed > e["allow"]:
+            print(f"  WIDE  {e['label']} — rewrites {changed} lines, allowance "
+                  f"{e['allow']}. Narrow the pattern, or raise the allowance if "
+                  f"the multi-line rewrite is deliberate.")
+            bad += 1
+    print(f"  {len(entries)} entries, {bad} problem(s)")
+    sys.exit(1 if bad else 0)
+
+# Measured on zion 2026-08-08: one clean `pytest -q <scope>` per scope, seconds.
+# These only steer BALANCE. An unlisted scope gets the default and a note; it is
+# never dropped, so a stale table costs evenness and never coverage.
+COST = {
+    "tests/test_nspawn_gate.py": 168, "tests/test_migrate_e2e.py": 43,
+    "tests/test_gate.py": 40, "tests/test_examples.py": 31,
+    "tests/test_service_e2e.py": 27, "tests/test_ordering.py": 23,
+    "tests/test_shared_interpreter.py": 18, "tests/test_oneshot.py": 10,
+    "tests/test_native_binary.py": 9, "tests/test_repo.py": 7,
+    "tests/test_assemble.py": 6, "tests/test_signing.py": 6,
+    "tests/test_cli.py": 6, "tests/test_escape_hatch.py": 3,
+    "tests/test_bake.py": 3, "tests/test_depends.py": 3,
+    "tests/test_interpreter.py": 3, "tests/test_spec.py": 1,
+    "tests/test_desktop.py": 1, "tests/test_deb.py": 1,
+    "tests/test_config.py": 1, "tests/test_migrate.py": 1,
+    "tests/test_types.py": 1,
+}
+DEFAULT = 30   # deliberately pessimistic: an unpriced scope must not land in a
+               # shard that is already full because we guessed it was cheap.
+
+groups = {}
+for i, e in enumerate(entries):
+    groups.setdefault(e["scope"], []).append(i)
+unpriced = sorted(s for s in groups if s not in COST)
+
+def cost(scope):
+    return COST.get(scope, DEFAULT)
+
+# A scope costs (runs + 2): its own baseline and its own control. Splitting one
+# across shards therefore BUYS parallelism and PAYS an extra baseline+control
+# per piece, so only split what a single shard could not carry.
+total = sum((len(v) + 2) * cost(k) for k, v in groups.items())
+target = total / N if N > 1 else float("inf")
+
+chunks = []
+for scope, idxs in groups.items():
+    c = cost(scope)
+    k = 1
+    while k < len(idxs) and (len(idxs) / k + 2) * c > target:
+        k += 1
+    for j in range(k):
+        part = idxs[j::k]
+        if part:
+            chunks.append(((len(part) + 2) * c, part, scope))
+chunks.sort(key=lambda t: -t[0])
+
+load = [0.0] * N
+assign = {}
+for w, part, _scope in chunks:
+    s = min(range(N), key=lambda i: load[i])
+    load[s] += w
+    for i in part:
+        assign[i] = s
+
+assert len(assign) == len(entries), \
+    f"assigned {len(assign)} of {len(entries)} entries"
+
+with mapfile.open("w") as fh:
+    for i, e in enumerate(entries):
+        fh.write(f"{i}\t{assign[i]}\t{e['scope']}\n")
+
+if unpriced:
+    print(f"  NOTE: no measured cost for {', '.join(unpriced)} "
+          f"-- assumed {DEFAULT}s each for balancing only")
+if N > 1:
+    print(f"  {len(entries)} entries over {N} shards; predicted "
+          f"{'/'.join(str(round(x)) for x in load)} seconds")
+else:
+    print(f"  {len(entries)} entries, predicted {round(total)}s")
+PY
+rc=$?
+[ "$PATTERNS_ONLY" = 1 ] && exit $rc
+[ "$rc" -eq 0 ] || { echo "ABORT: could not build the entry map"; exit 2; }
+
+# idx -> shard, and the scopes THIS shard owns.
+declare -a ENTRY_SHARD=()
+declare -A SHARD_SCOPES=()
+while IFS=$'\t' read -r idx shard scope; do
+  ENTRY_SHARD[$idx]=$shard
+  [ "$shard" -eq "$((SHARD_I - 1))" ] && SHARD_SCOPES["$scope"]=1
+done < "$MAPFILE"
+IDX=-1
+
+# ---- per-scope baseline, taken once, lazily --------------------------------
+# The precondition, moved from "the whole suite an hour ago" to "this scope,
+# just now". Red here aborts: a mutation verdict read off an already-failing
+# scope means nothing at all.
+declare -A SCOPE_BASELINED=()
+baseline_scope() {
+  local scope=$1
+  [ -n "${SCOPE_BASELINED[$scope]:-}" ] && return 0
+  purge
+  local rc; rc=$(run "$scope")
+  SCOPE_BASELINED[$scope]=1
+  if [ "$rc" -ne 0 ]; then
+    echo "  ABORT: $scope is not green before mutating (rc=$rc)"
+    sed 's/^/    | /' /tmp/rv.log | tail -25
+    exit 2
+  fi
+  echo "  baseline $scope rc=0"
+}
+
 check() {  # check <label> <file> <expr> <scope> [max-changed-lines, default 2]
   local label=$1 file=$2 expr=$3 scope=$4 maxlines=${5:-2}
+  IDX=$((IDX + 1))
+  # The map is built by parsing this same file, so a miss here means the two
+  # readers disagreed about where an entry ends -- silently running fewer
+  # entries than the file declares is the one outcome this script may not have.
+  [ -n "${ENTRY_SHARD[$IDX]:-}" ] || {
+    echo "ABORT: entry $IDX ($label) is absent from the map — the parser and "\
+"bash disagree about this file"; exit 2; }
+  [ "${ENTRY_SHARD[$IDX]}" -eq "$((SHARD_I - 1))" ] || return 0
+  baseline_scope "$scope"
   cp "$file" /tmp/rv.keep
   uv run python - "$file" <<PY
 import sys, pathlib
@@ -87,9 +309,7 @@ PY
   else echo "  FAIL  $label — guard removed and suite STAYED GREEN"; fail=1; fi
 }
 
-echo "════ baseline (must be green, or nothing below is meaningful) ════"
-purge; base=$(run); echo "  baseline rc=$base"
-[ "$base" -eq 0 ] || { echo "ABORT: suite is not green before mutating"; exit 2; }
+echo "════ shard $SHARD_I/$SHARD_N — baselines are taken per scope, on first use ════"
 
 echo "════ Task 1 — interpreter provenance ════"
 check "T1 provenance: root must be under uv python dir" src/porter/interpreter.py \
@@ -131,10 +351,16 @@ check "T3 PORTER_REQUIRE_SYSTEMD arms the systemd-analyze skip" tests/conftest.p
 echo "════ Task 3 — guards verified once by hand and, until now, on no run ════"
 check "T3 split: admin keys are excluded from defaults" src/porter/config.py \
   's = s.replace("if k not in admin_keys", "if True")' tests/test_config.py
+# These two were scoped to the WHOLE suite, which is 400s a run here and 800s of
+# the registry's 67 minutes -- for a verdict tests/test_config.py delivers in
+# 0.7s. Measured 2026-08-08: both mutations are red under test_config.py alone,
+# and under test_service_e2e.py too. Narrowing the scope does not narrow the
+# claim; the entry still says "guard removed => red", from the file that owns
+# the guard, exactly as the other 165 do.
 check "T3 postinst creates env only when absent" src/porter/config.py \
-  's = s.replace("if [ ! -f /etc/{pkg}/env ]; then", "if true; then")' tests/
+  's = s.replace("if [ ! -f /etc/{pkg}/env ]; then", "if true; then")' tests/test_config.py
 check "T3 env is chmod 600" src/porter/config.py \
-  's = s.replace("chmod 600", "chmod 644")' tests/ 8
+  's = s.replace("chmod 600", "chmod 644")' tests/test_config.py 8
 check "T3 admin env is read, and read last" src/porter/systemd.py \
   's = s.replace("EnvironmentFile=-/etc/{pkg}/env", "EnvironmentFile=/etc/{pkg}/defaults")' tests/test_config.py
 
@@ -205,8 +431,13 @@ echo "════ Task 4 fix 1 — the entry point, which had no test at all �
 # probe execs a relative interpreter path with cwd= set below it, the child
 # chdir's before exec, and `porter build` fails on porter's own example.
 # tests/test_assemble.py stays GREEN under this mutation -- that is the finding.
+# Allowance 4, and DELIBERATE. `Path(stage_root).resolve()` is one guard at the
+# two functions that take a stage_root -- `vendor()` and `assemble()` -- so the
+# mutation disables it at both. That is not Trap 6: the second site is the same
+# guard, not an unrelated branch the pattern drifted onto, and a verdict about
+# "the stage root is resolved" is honest when neither site resolves it.
 check "T4 stage_root is resolved before anything execs out of it" src/porter/assemble.py \
-  's = s.replace("Path(stage_root).resolve()", "Path(stage_root)")' tests/test_cli.py
+  's = s.replace("Path(stage_root).resolve()", "Path(stage_root)")' tests/test_cli.py 4
 # porter invents the stage, so porter removes it. Removed, a 97 MB tree survives
 # every run: the command succeeds exactly once and then reports a refusal about
 # a directory the user never created, and a failure reports a different error
@@ -229,8 +460,13 @@ echo "════ Task 4 fix 1 — the porter.spec seam ════"
 # of giving the gallery a second schema. Mutated into its own definitions --
 # exactly what "Task 7 duplicates" looks like -- the identity assertion is the
 # only thing anywhere that notices.
+# The needle carried the pre-Task-10 import list and stopped matching the moment
+# `Migration` joined it, which the harness reported as "pattern did not match" --
+# correctly: an entry that matches nothing is a guard that is no longer checked.
+# Spelled out in full rather than anchored on a prefix, so the next name added to
+# porter.types SKIPs here loudly instead of half-mutating the import.
 check "T4 porter.spec re-exports porter.types, never redefines it" src/porter/spec.py \
-  's = s.replace("from porter.types import BakeArtifact, Component, Python", "class BakeArtifact: pass\nclass Component: pass\nclass Python: pass")' \
+  's = s.replace("from porter.types import BakeArtifact, Component, Migration, Python", "class BakeArtifact: pass\nclass Component: pass\nclass Migration: pass\nclass Python: pass")' \
   tests/test_types.py 6
 
 echo "════ Task 9 ════"
@@ -300,8 +536,13 @@ check "T9 a step's failure cannot be laundered through a pipe" src/porter/bake.p
 # Not a refusal but the same failure class: the payload silently absent. Removed,
 # examples/baked-data builds a .deb at rc=0 with no corpus in it -- the service
 # installs, starts, and 500s on its first request.
+# TRAP 6. `for entry in component.data_paths:` is written TWICE in assemble.py:
+# here, and in `_refuse_what_porter_cannot_emit`, where it drives the reserved-
+# name refusal that has its own entry ("REV a data: entry may not collide..").
+# The unanchored pattern disabled both, so the verdict was about two guards at
+# once. Anchored on the `sharedir` assignment, which only the staging loop has.
 check "T9 data: entries are staged into /usr/share/<pkg>" src/porter/assemble.py \
-  's = s.replace("for entry in component.data_paths:", "for entry in []:")' \
+  's = s.replace("    sharedir = stage / \"usr/share\" / pkg\n    for entry in component.data_paths:", "    sharedir = stage / \"usr/share\" / pkg\n    for entry in []:")' \
   tests/test_bake.py
 # The provenance seam. Removed, every package ships without a VERSION and a
 # client fault report can name the package version and nothing else -- two
@@ -612,8 +853,20 @@ check "T5 the generated install.sh must parse" src/porter/repo.py \
 # Our sources entry names a path on the USB stick. Left behind, every later
 # `apt-get update` on that client exits 100 on a repository that was unplugged
 # weeks ago -- porter breaking apt for good, on a machine nobody can ssh into.
-check "T5 the apt sources entry is removed on the way out" src/porter/repo.py \
-  's = s.replace("rm -f \"$LIST\"", "true")' tests/test_repo.py
+# TRAP 6, and the drift was expensive to read: `rm -f "$LIST"` is a SUBSTRING of
+# TRUST_SIGNED's `rm -f "$LIST" "$KEYRING"`, so the one entry rewrote both
+# templates AND turned the signed one into `trap 'true "$KEYRING"' EXIT` -- a
+# third guard, the keyring's removal, disabled as a side effect. Each template
+# now gets its own entry, anchored on the whole `trap` line.
+check "T5 the apt sources entry is removed on the way out (unsigned)" src/porter/repo.py \
+  's = s.replace("trap '"'"'rm -f \"$LIST\"'"'"' EXIT", "trap '"'"'true'"'"' EXIT")' tests/test_repo.py
+# The signed template's own trap, which the entry above used to reach by
+# accident and now cannot. It removes two files, and a client that keeps either
+# has an `apt-get update` that fails for good on a stick that is gone.
+check "T5 the apt sources entry AND the keyring are removed on the way out (signed)" \
+  src/porter/repo.py \
+  's = s.replace("trap '"'"'rm -f \"$LIST\" \"$KEYRING\"'"'"' EXIT", "trap '"'"'true'"'"' EXIT")' \
+  tests/test_repo.py
 # The re-exec must not eat the caller's argv. Parsing the flags before lifting
 # to root -- the obvious order -- consumes them all, so the deployer who asked
 # for `--version 1.0` silently gets 2.0, at rc=0.
@@ -717,8 +970,13 @@ check "T8 an object objdump cannot read is not a dependency-free one" \
 # and return the rest. That is the ORIGINAL bug -- a Depends: short by exactly
 # the library the build host does not have, which is the one the client will not
 # have either. Two lines because reproducing the symptom needs both halves.
+# TRAP 6, by indentation: `    if missing:` (4 spaces) is a SUBSTRING of the
+# native-binary loop's `        if missing:` (8), so the pattern also rewrote
+# that branch -- and rewrote it into `    sonames = ...` at the wrong indent
+# against a `sonames` that does not exist there. Anchored on the comprehension
+# above it, which only `derive_depends`'s soname check has.
 check "T8 a soname the build host cannot resolve is refused" src/porter/depends.py \
-  's = s.replace("    if missing:", "    sonames = [so for so in sonames if so in cache]\n    if False:")' \
+  's = s.replace("    missing = [so for so in sonames if so not in cache]\n    if missing:", "    missing = [so for so in sonames if so not in cache]\n    sonames = [so for so in sonames if so in cache]\n    if False:")' \
   tests/test_depends.py 4
 # A library hand-installed under /usr/local resolves perfectly here and maps to
 # no package at all. Removed, `packages_owning` returns the other entries and
@@ -737,9 +995,14 @@ check "T8 a library the payload ships itself is not a system dependency" \
 # any manifest names it, it arrives through the single dynamically-linked
 # extension in the vendored interpreter, and a hand-written list would not have
 # it. Scoped to one nodeid -- the fixture builds two real .debs.
+# TRAP 6. `depends = derive_depends(stage)` is written at THREE sites in
+# assemble.py -- the component's control, the hook stage's control, and the
+# shared interpreter package's -- so the bare pattern disabled all three and
+# neither this entry nor T12's said anything about the site it names. Anchored
+# on the comment that follows only the component's call.
 check "T8 the core package derives Depends from what it stages" \
   src/porter/assemble.py \
-  's = s.replace("    depends = derive_depends(stage)", "    depends = []")' \
+  's = s.replace("    depends = derive_depends(stage)\n    # First, and by exact version.", "    depends = []\n    # First, and by exact version.")' \
   "tests/test_desktop_e2e.py::test_the_core_package_declares_the_dependencies_it_derived"
 # Rule 12. A desktop dependency in the core package cannot be satisfied on an
 # airgapped headless client -- apt has no network and the GUI libraries are not
@@ -747,14 +1010,30 @@ check "T8 the core package derives Depends from what it stages" \
 check "T8 a desktop dependency in the core package is refused" src/porter/desktop.py \
   's = s.replace("    if leaked:", "    if False:")' tests/test_desktop.py
 # THE launcher bug, and the reason those tests RUN the script instead of
-# grepping it. `command -v X && BROWSER=X && break` is an AND-list whose failure
-# is the last command of the loop body, so under `set -e` the launcher exits 1
-# the moment the first candidate is absent -- every client without Chrome, with
-# no window and no message. The broken form contains every substring the working
-# one does, so no text assertion can tell them apart.
+# grepping it: a client without the first candidate gets rc=1, no window and no
+# message. The broken form contains every substring the working one does, so no
+# text assertion can tell them apart.
+#
+# THE PREVIOUS MUTATION HERE WAS INERT, and it is worth saying why rather than
+# quietly swapping it. It installed `command -v X && BROWSER=X && break`, on the
+# claim that `set -e` kills the script when the AND-list fails. It does not:
+# POSIX and bash both exempt a command that fails in a NON-FINAL position of an
+# `&&` list, and the enclosing `for` does not re-raise it. Measured 2026-08-08 on
+# bash 5.3 --
+#   for c in a b; do false; done                              -> rc=1 (dies)
+#   for c in a b; do command -v nope && B=$c && break; done    -> rc=0 (survives)
+#   for c in a b; do true && true && command -v nope; done     -> rc=1 (dies)
+# -- so the two forms are behaviourally identical and the entry was Trap 2: a
+# mutation that changes bytes and nothing else, reporting a healthy guard as
+# broken. That claim was never measured; grep finds the AND-list in no commit.
+#
+# What the `if` really buys is the exemption itself, so the mutation now removes
+# THAT: the probe becomes a bare simple command, whose failure `set -e` does
+# act on. It reproduces the symptom the tests exist for -- the launcher exits 1
+# at the first absent candidate, and six of them go red including the one named.
 check "T8 the launcher survives a browser candidate being absent" src/porter/desktop.py \
-  's = s.replace("  if command -v \"$candidate\" >/dev/null 2>&1; then\n    BROWSER=\"$candidate\"\n    break\n  fi", "  command -v \"$candidate\" >/dev/null 2>&1 && BROWSER=\"$candidate\" && break")' \
-  tests/test_desktop.py 5
+  's = s.replace("  if command -v \"$candidate\" >/dev/null 2>&1; then", "  command -v \"$candidate\" >/dev/null 2>&1; if true; then")' \
+  tests/test_desktop.py
 # A click right after login arrives while systemd is still starting the unit.
 # Without the wait the window opens on connection-refused, which reads as a
 # broken install rather than a slow one.
@@ -851,8 +1130,20 @@ check "T6 the upgrade path is ordered by dpkg, not lexically" src/porter/gate.py
 # `health_url` is interpolated into the gate's own shell. `...; true` exits 0,
 # so the gate would report a healthy service with nothing listening -- a false
 # pass manufactured by the gate itself.
+# TRAP 6, and the same shape for the four CONTROL entries below it. gate.py holds
+# TWO gates -- the docker one (`_script`/`gate`) and the nspawn one
+# (`_nspawn_script`/`nspawn_gate`) -- and every pattern in this block matched a
+# line in each. The scope here is tests/test_gate.py, which runs only the docker
+# gate, so the nspawn half of every mutation was a change the run never
+# exercised: a verdict about a guard, delivered while a second one was silently
+# disabled. Each is now anchored on text only the docker side has.
+#
+# The nspawn probe script's own markers have no entries at all -- the eight
+# tests/test_nspawn_gate.py entries mutate `nspawn_gate()`'s `r.check(...)`
+# verdicts, not the script that produces them. That gap is pre-existing and is
+# recorded in the Task 15 report rather than closed here.
 check "T6 a health URL that could run shell is refused" src/porter/gate.py \
-  's = s.replace("    if not HEALTH_URL.match(health_url):", "    if False:")' \
+  's = s.replace("    # question, which is worse.\n    if not PACKAGE_NAME.match(app):\n        raise ValueError(f\"{app!r} is not a Debian package name\")\n    if not HEALTH_URL.match(health_url):", "    # question, which is worse.\n    if not PACKAGE_NAME.match(app):\n        raise ValueError(f\"{app!r} is not a Debian package name\")\n    if False:")' \
   tests/test_gate.py
 # ---- controls: break the probe, and assert the control notices --------------
 # THE GATE RULE, executed on the gate. Remove the airgap and the isolation
@@ -866,13 +1157,13 @@ check "T6 CONTROL the isolation probe detects a container with a network" src/po
 # reports a clean client either way -- the blind probe the count exists to
 # detect.
 check "T6 CONTROL a blind apt-source probe is not read as a clean client" src/porter/gate.py \
-  's = s.replace("echo \"NETSRC_BEFORE=$(cat /etc/apt/sources.list ", "echo \"NETSRC_BEFORE=$(cat /nonexistent ")' \
+  's = s.replace("# repo the same way, so that goes too.\necho \"NETSRC_BEFORE=$(cat /etc/apt/sources.list ", "# repo the same way, so that goes too.\necho \"NETSRC_BEFORE=$(cat /nonexistent ")' \
   tests/test_gate.py
 # The install is bounded by `timeout`, and a hang is the failure that matters
 # most on an airgapped client -- at 3am it is indistinguishable from an install
 # still running. A `timeout` that does not fire makes that bound decorative.
 check "T6 CONTROL a timeout that does not fire is caught" src/porter/gate.py \
-  's = s.replace("timeout 1 sleep 5; echo \"TIMEOUTCTL=$?\"", "timeout 5 sleep 1; echo \"TIMEOUTCTL=$?\"")' \
+  's = s.replace("timeout 1 sleep 5; echo \"TIMEOUTCTL=$?\"\n", "timeout 5 sleep 1; echo \"TIMEOUTCTL=$?\"\n")' \
   tests/test_gate.py
 # "The install reached no prompt" is worthless under a harness that cannot
 # notice one. Discard the read probe's own result and the harness must declare
@@ -884,13 +1175,13 @@ check "T6 CONTROL a harness where an interactive read succeeds is refused" src/p
 # is started. Hand the gate a 0 there and it must refuse to treat the later 0 as
 # evidence that the shipped ExecStart did anything.
 check "T6 CONTROL a health URL answering before the start is refused" src/porter/gate.py \
-  's = s.replace("echo \"PREHEALTH_RC=$?\"", "echo \"PREHEALTH_RC=0\"")' \
+  's = s.replace("echo \"PREHEALTH_RC=$?\"\n", "echo \"PREHEALTH_RC=0\"\n")' \
   tests/test_gate.py
 # Every marker check reads a transcript. Truncate it and they would all be
 # reading a log that stopped early, with "the marker is absent" meaning "the
 # container died" rather than "the assertion failed".
 check "T6 CONTROL a transcript that stops early is not read as a pass" src/porter/gate.py \
-  's = s.replace("echo \"DONE=yes\"", "echo \"DONE=no\"")' \
+  's = s.replace("echo \"DONE=yes\"\n", "echo \"DONE=no\"\n")' \
   tests/test_gate.py
 
 echo "════ Task 12 ════"
@@ -928,9 +1219,13 @@ check "T12 a build: hook takes over the assemble stage" src/porter/assemble.py \
 # stage is full of real bytes -- so this is the one guard with a test written
 # specifically to leave it alone in the room
 # (`test_a_hook_that_fails_after_writing_a_partial_tree_is_still_refused`).
+# TRAP 6. `    if proc.returncode != 0:` is also the staged interpreter's version
+# probe a hundred lines down -- a different guard, with its own entry -- so the
+# bare pattern disabled two and the verdict named one. Anchored on the hook's
+# own `env=` argument.
 check "T12 the hook's rc is read, and a partial tree does not ship" \
   src/porter/assemble.py \
-  's = s.replace("    if proc.returncode != 0:", "    if False:")' \
+  's = s.replace("        env=_hook_environment(component, python, src_root, stage, stamp))\n    if proc.returncode != 0:", "        env=_hook_environment(component, python, src_root, stage, stamp))\n    if False:")' \
   tests/test_escape_hatch.py
 # Removed, porter reports its own rc and swallows the script's diagnostic. The
 # build still fails, so this is a MESSAGE-ONLY mutation (Trap 4): what goes red
@@ -985,9 +1280,14 @@ check "T12 conffiles are derived from the tree a hook wrote" \
 # own, so the mutation disables both call sites. The scope is the hatch's tests,
 # which never reach the other one, so the verdict is still about the hook's --
 # but it is not a one-guard mutation and Trap 6 says to say so.
+# Same TRAP 6 as the T8 entry above, anchored on the comment that follows only
+# the hook stage's call. The two entries are deliberately duplicated with
+# different scopes -- a shared line reached from two callers, each of which has
+# to be shown to still derive -- and that only means anything once each mutation
+# reaches exactly one of them.
 check "T12 Depends: is derived from what a hook staged" src/porter/assemble.py \
-  's = s.replace("    depends = derive_depends(stage)", "    depends = []")' \
-  tests/test_escape_hatch.py 4
+  's = s.replace("    depends = derive_depends(stage)\n    if depends:\n        control[\"Depends\"] = \", \".join(depends)\n    # Derived from the tree the hook wrote", "    depends = []\n    if depends:\n        control[\"Depends\"] = \", \".join(depends)\n    # Derived from the tree the hook wrote")' \
+  tests/test_escape_hatch.py
 # The stage a hook is handed is empty, from the hatch's side. Same line as the
 # T4 entry above and deliberately duplicated with a different scope: a shared
 # helper guarded only through one caller's tests is a helper that stops being
@@ -1331,9 +1631,26 @@ check "T14 systemd must actually replace a killed process" src/porter/gate.py \
 #   from inside the suite; a registry entry would report PASS for the wrong
 #   reason or FAIL always.
 echo
-echo "════ control: suite green again after every restore ════"
-purge; final=$(run); echo "  restored rc=$final"
-[ "$final" -eq 0 ] || { echo "  FAIL — harness left dirty"; fail=1; }
+echo "════ control: every scope this shard touched is green again ════"
+# The control, and it is not optional. A mutation that failed to restore leaves
+# a tree that later entries -- and any reader -- take for clean, so a green run
+# above a dirty harness is exactly the silent success this script exists to
+# catch, one level up. Re-run every scope the shard baselined, after the last
+# restore, and require the same green it started from.
+if [ ${#SCOPE_BASELINED[@]} -eq 0 ]; then
+  echo "  no entries in this shard — nothing to restore"
+else
+  for scope in "${!SCOPE_BASELINED[@]}"; do
+    purge; final=$(run "$scope")
+    if [ "$final" -eq 0 ]; then
+      echo "  restored $scope rc=0"
+    else
+      echo "  FAIL — harness left dirty: $scope rc=$final"
+      sed 's/^/    | /' /tmp/rv.log | tail -25
+      fail=1
+    fi
+  done
+fi
 echo
-echo "════ RESULT: $([ $fail -eq 0 ] && echo 'all guards still bite' || echo 'PROBLEMS FOUND') ════"
+echo "════ RESULT shard $SHARD_I/$SHARD_N: $([ $fail -eq 0 ] && echo 'all guards still bite' || echo 'PROBLEMS FOUND') ════"
 exit $fail
