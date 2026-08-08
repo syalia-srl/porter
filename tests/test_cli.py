@@ -85,8 +85,9 @@ def test_porter_build_runs_twice_from_a_cwd_where_its_defaults_are_relative(
     assert first.returncode == 0, first.stderr
 
     debs = sorted((tmp_path / "dist").glob("*.deb"))
-    assert [d.name for d in debs] == [f"{pkg}_{demo_manifest['version']}_"
-                                      f"{demo_manifest['architecture']}.deb"]
+    expected = (f"{pkg}_{demo_manifest['version']}"
+                f"_{demo_manifest['architecture']}.deb")
+    assert [d.name for d in debs] == [expected]
     assert debs[0].stat().st_size > 20_000_000, (
         f"{debs[0]} is only {debs[0].stat().st_size} bytes: a vendored "
         "interpreter under -Znone cannot be small, so this is a truncated build")
