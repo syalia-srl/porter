@@ -20,16 +20,32 @@ on:
 # header is read rather than described -- so a runner without a C compiler
 # would skip every test that covers rule 11's derivation, and a skipped test is
 # green.
+# PORTER_REQUIRE_NSPAWN is the fifth, added with Task 14, and it is armed on a
+# MEASUREMENT rather than a hope. It was deliberately left out while nobody knew
+# whether a GitHub-hosted runner could boot systemd-nspawn -- arming a gate that
+# cannot be satisfied turns every run red for a reason unrelated to the change
+# under test, which is its own kind of uninformative. Measured 2026-08-08 on
+# `ubuntu-latest`, in 33 seconds end to end: with `systemd-container` installed
+# it exports a Debian root through docker, boots it `--private-network --boot`,
+# comes up with systemd as PID 1, reports `systemd-detect-virt --container` =
+# systemd-nspawn, isolates to `lo` alone, and applies ProtectSystem=strict to a
+# transient unit. So the hole AGENTS.md's rule pointed at is closed rather than
+# excused: the only tests in porter that start a unit with systemd cannot
+# silently skip here.
 env:
   PORTER_REQUIRE_UV: "1"
   PORTER_REQUIRE_DOCKER: "1"
   PORTER_REQUIRE_SYSTEMD: "1"
   PORTER_REQUIRE_CC: "1"
+  PORTER_REQUIRE_NSPAWN: "1"
 
 jobs:
   tests:
     runs-on: ubuntu-latest
-    timeout-minutes: 25
+    # Raised for the nspawn gate: three systemd boots and a 97 MB package in the
+    # suite, and the same again inside `reverify-guards.sh` for each of the eight
+    # entries whose scope is tests/test_nspawn_gate.py.
+    timeout-minutes: 60
     steps:
       - uses: actions/checkout@v4
 
@@ -49,6 +65,15 @@ jobs:
           # naming it here turns that into one legible line instead of a
           # failure discovered midway through the suite.
           command -v systemd-analyze >/dev/null || { echo "systemd-analyze missing"; exit 1; }
+          # systemd-nspawn is NOT on a runner by default -- it lives in
+          # systemd-container. With PORTER_REQUIRE_NSPAWN=1 its absence is a
+          # test failure, so install it here and assert it landed, which turns
+          # "the gate can't nspawn" into one legible line instead of a wall of
+          # failures halfway through the suite.
+          sudo apt-get update -qq
+          sudo apt-get install -y -qq systemd-container
+          command -v systemd-nspawn >/dev/null || { echo "systemd-nspawn missing"; exit 1; }
+          sudo -n true || { echo "passwordless sudo missing; nspawn gate cannot run"; exit 1; }
           # Same bargain for the compiler examples/native-binary bakes with.
           command -v cc >/dev/null || { echo "cc missing"; exit 1; }
           docker version --format '{{.Server.Version}}'
