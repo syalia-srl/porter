@@ -104,7 +104,7 @@ Spanish-speaking is still an English tool.
 ## Running the tests
 
 ```bash
-PORTER_REQUIRE_UV=1 uv run --extra dev pytest
+PORTER_REQUIRE_UV=1 PORTER_REQUIRE_DOCKER=1 uv run --extra dev pytest
 ```
 
 **Always set `PORTER_REQUIRE_UV=1`.** Most of the suite needs `uv` on PATH to
@@ -113,6 +113,19 @@ exits 0 — a green run that tested almost nothing. The variable turns the skip
 into an error. It is off by default so a contributor without uv gets skips rather
 than a wall of failures; it must be on anywhere a green result is trusted, and it
 is the first thing to wire into CI when CI exists.
+
+**`PORTER_REQUIRE_DOCKER=1` is the same bargain**, for the same reason: the
+`docker`-marked tests are the only ones that *install* a package rather than
+merely build one, so a run that skips them has verified nothing about the
+client.
+
+**Purge `__pycache__` after any edit-run-restore cycle** (mutation testing, a
+bisect, a quick experiment). CPython invalidates bytecode on source mtime *and
+size*: an edit that preserves the byte count and is reverted inside the same
+second leaves a stale `.pyc` that Python considers current. Measured here
+2026-08-08 — swapping the unit's two `EnvironmentFile` lines is byte-identical
+in length, and after `git checkout` the *mutated* module kept loading against a
+clean tree. `find src tests -name __pycache__ -type d -exec rm -rf {} +`.
 
 ## Documents
 
@@ -148,7 +161,23 @@ done twice.)*
   Control values are folded onto Debian continuation lines. 29 tests, each
   asserted against the built artefact. `__pycache__` is *not* treated as
   residue: a vendored interpreter ships 35 such directories.
-- **Next:** Task 3 — stage a vendored interpreter plus app code and package it.
+- **Task 3 done:** `src/porter/config.py` (`split`, `env_postinst`) and
+  `src/porter/systemd.py` (`unit`), plus the gallery's first entry,
+  `examples/service-fastapi/`. 13 tests. The example's `porter.yaml` is the
+  only place its package name, interpreter version, requirements, ExecStart and
+  env template are written — the fixtures read it, so an example that stops
+  parsing or building takes the suite red. Three container tests run
+  `--network none` against a base image asserted to have **no** `python3`:
+  the service answers HTTP; an upgrade keeps `/etc/demo-app/env` at
+  `600 root:root` while delivering both a corrected value and a brand-new
+  package-owned key; and the same upgrade with the conffile locally edited is
+  refused by dpkg (`end of file on stdin at conffile prompt`, rc=1, with
+  `DEBIAN_FRONTEND=noninteractive` set) — the measurement rule 4 rests on,
+  reproduced as a positive control.
+- **Next:** Task 4 — the nspawn gate, which is where the emitted unit is
+  finally *started* by systemd. Nothing so far has run one: the unit's shape is
+  checked with `systemd-analyze verify` and its ExecStart is exercised by hand
+  in a container.
 
 The `porter.yaml` schema is defined by the example gallery: each example is a
 manifest that must parse and build, so a field with no example exercising it does
