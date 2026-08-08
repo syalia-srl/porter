@@ -51,10 +51,12 @@ def test_the_admin_file_is_not_in_the_package_and_defaults_is_a_conffile(built_d
 
 def test_the_vendored_interpreter_is_the_payload_and_the_package_is_of_a_plausible_size(
         built_demo_deb):
-    """Magnitude, per the gate rule. A vendored 3.12 plus FastAPI is ~150 MB
-    uncompressed and the package is built -Znone; a .deb of a few hundred KB
-    would mean the interpreter never got staged, and every path assertion above
-    would still pass."""
+    """Magnitude, per the gate rule. A vendored 3.12 plus FastAPI stages to
+    97 MB and, built -Znone, lands as an 89 MiB .deb (measured on zion
+    2026-08-08). A .deb of a few tens of KB would mean the interpreter never
+    got staged -- and every path assertion above would still pass: with a stub
+    file at that path the package built to 30,912 bytes and only this check
+    caught it."""
     assert "./usr/lib/demo-app/python/bin/python3.12" in _contents(built_demo_deb)
     size = built_demo_deb.stat().st_size
     assert size > 50_000_000, f"{built_demo_deb} is {size} bytes -- too small to hold an interpreter"

@@ -133,7 +133,8 @@ def demo_manifest() -> dict:
 def demo_stage(tmp_path_factory, demo_manifest) -> Path:
     """Everything in the example's package except the version-specific config.
 
-    Session-scoped because vendoring plus `uv pip install` is ~150 MB of tree;
+    Session-scoped because vendoring plus `uv pip install` is a 97 MB tree
+    (measured on zion 2026-08-08);
     the two .debs are built from this one stage, in sequence, which is also how
     a real v_prev/v_next pair is produced.
     """
