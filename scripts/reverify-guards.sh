@@ -55,8 +55,8 @@ run()   { PORTER_REQUIRE_UV=1 PORTER_REQUIRE_DOCKER=1 PORTER_REQUIRE_SYSTEMD=1 \
             uv run --extra dev pytest -q "$@" >/tmp/rv.log 2>&1; echo $?; }
 
 fail=0
-check() {  # check <label> <file> <python-replace-expr> <expect-tests>
-  local label=$1 file=$2 expr=$3 scope=$4
+check() {  # check <label> <file> <expr> <scope> [max-changed-lines, default 2]
+  local label=$1 file=$2 expr=$3 scope=$4 maxlines=${5:-2}
   cp "$file" /tmp/rv.keep
   uv run python - "$file" <<PY
 import sys, pathlib
@@ -76,8 +76,8 @@ PY
   # about something other than the guard named.
   local changed
   changed=$(diff /tmp/rv.keep "$file" | grep -c '^[<>]' || true)
-  if [ "${changed:-0}" -gt 2 ]; then
-    echo "  SKIP  $label — mutation rewrote $changed lines; expected one site. Narrow the pattern."
+  if [ "${changed:-0}" -gt "$maxlines" ]; then
+    echo "  SKIP  $label — mutation rewrote $changed lines, allowance $maxlines. Narrow the pattern, or raise the allowance if it is deliberate."
     cp /tmp/rv.keep "$file"; purge; fail=1; return
   fi
   purge
@@ -121,7 +121,7 @@ check "T3 a host with no booted systemd skips systemctl entirely" src/porter/con
 # Presence of the hardening directives, which systemd-analyze cannot see: it
 # reports keys it does not recognise, never keys that are absent.
 check "T3 the unit carries its hardening directives" src/porter/systemd.py \
-  's = s.replace("ProtectSystem=strict\n", "")' tests/test_config.py
+  's = s.replace("ProtectSystem=strict\n", "")' tests/test_config.py 6
 # And the arming variable itself: disarmed, a missing systemd-analyze goes back
 # to skipping silently and taking seven directives with it.
 check "T3 PORTER_REQUIRE_SYSTEMD arms the systemd-analyze skip" tests/conftest.py \
@@ -134,7 +134,7 @@ check "T3 split: admin keys are excluded from defaults" src/porter/config.py \
 check "T3 postinst creates env only when absent" src/porter/config.py \
   's = s.replace("if [ ! -f /etc/{pkg}/env ]; then", "if true; then")' tests/
 check "T3 env is chmod 600" src/porter/config.py \
-  's = s.replace("chmod 600", "chmod 644")' tests/
+  's = s.replace("chmod 600", "chmod 644")' tests/ 8
 check "T3 admin env is read, and read last" src/porter/systemd.py \
   's = s.replace("EnvironmentFile=-/etc/{pkg}/env", "EnvironmentFile=/etc/{pkg}/defaults")' tests/test_config.py
 
@@ -225,7 +225,7 @@ echo "════ Task 4 fix 1 — the porter.spec seam ════"
 # exactly what "Task 7 duplicates" looks like -- the identity assertion is the
 # only thing anywhere that notices.
 check "T4 porter.spec re-exports porter.types, never redefines it" src/porter/spec.py \
-  's = s.replace("from porter.types import Component, Python", "class Component: pass\nclass Python: pass")' \
+  's = s.replace("from porter.types import BakeArtifact, Component, Python", "class BakeArtifact: pass\nclass Component: pass\nclass Python: pass")' \
   tests/test_types.py
 
 echo "════ Task 9 ════"
@@ -264,7 +264,7 @@ check "T9 a database still in WAL mode is refused" src/porter/bake.py \
 # the stranding fixture bakes successfully and its half-database is the payload.
 check "T9 BOTH sqlite guards removed — the stale corpus ships at rc=0" src/porter/bake.py \
   's = s.replace("if not wal.exists() or wal.stat().st_size == 0:", "if True:").replace("if header[_WRITE_VERSION_OFFSET] != _WAL_FORMAT:", "if True:")' \
-  tests/test_bake.py
+  tests/test_bake.py 6
 # The magnitude check, which is the difference between "the file is there" and
 # "the file is real". Removed, a bake whose step created an empty SQLite
 # database -- one that exists, opens and answers queries with nothing -- returns
@@ -432,7 +432,7 @@ echo "════ Task 11 — ordering: the refusals ════"
 # way, `after: [alpah]` builds at rc=0 with the dependency silently dropped.
 check "T11 an after: naming an undeclared component is refused" src/porter/systemd.py \
   's = s.replace("            if dep not in by_name:", "            if False:").replace("for d in c.after]", "for d in c.after if d in by_name]")' \
-  tests/test_ordering.py
+  tests/test_ordering.py 6
 # Removed, a cycle is emitted. systemd loads it, deletes one of the jobs to
 # break the cycle, and boots -- so the order is systemd's choice, it differs
 # from what the manifest says, and nothing anywhere reports a problem.
