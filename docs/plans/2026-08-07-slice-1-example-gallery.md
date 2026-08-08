@@ -255,11 +255,17 @@ def test_builds_a_deb_with_the_declared_fields(tmp_path):
 
 
 def test_conffiles_are_registered(tmp_path):
+    """Read the control tar in-process. Piping --ctrl-tarfile's bytes into a
+    text=True subprocess raises TypeError, and asserting on a member NAME would
+    pass against an empty conffiles file -- assert the content."""
+    import io, tarfile
     deb = build_deb(_stage(tmp_path), CONTROL, tmp_path, conffiles=["/etc/demo-app/defaults"])
-    listing = subprocess.run(["dpkg-deb", "--ctrl-tarfile", str(deb)],
-                             capture_output=True, check=True).stdout
-    names = subprocess.run(["tar", "-t"], input=listing, capture_output=True, text=True).stdout
-    assert "conffiles" in names
+    proc = subprocess.run(["dpkg-deb", "--ctrl-tarfile", str(deb)], capture_output=True)
+    assert proc.returncode == 0, proc.stderr
+    with tarfile.open(fileobj=io.BytesIO(proc.stdout)) as tar:
+        member = tar.extractfile("./conffiles")
+        assert member is not None, "no conffiles member in the control archive"
+        assert "/etc/demo-app/defaults" in member.read().decode()
 
 
 def test_refuses_a_stage_that_writes_to_client_state(tmp_path):
