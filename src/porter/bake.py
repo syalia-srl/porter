@@ -225,7 +225,8 @@ def _refuse_a_database_still_in_wal_mode(db: Path) -> None:
     standing reason: a connection would checkpoint on close and destroy the
     evidence the check above is looking for.
     """
-    header = db.open("rb").read(_WRITE_VERSION_OFFSET + 1)
+    with db.open("rb") as fh:
+        header = fh.read(_WRITE_VERSION_OFFSET + 1)
     if len(header) <= _WRITE_VERSION_OFFSET:
         return  # a 16-byte stub is somebody's fixture, and the size check has it
     if header[_WRITE_VERSION_OFFSET] != _WAL_FORMAT:
