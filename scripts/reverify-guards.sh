@@ -792,6 +792,280 @@ check "T8 a name that is not an X11 WM_CLASS is refused" src/porter/desktop.py \
   's = s.replace("    if not WM_CLASS.match(name):", "    if False:")' \
   tests/test_desktop.py
 
+echo "════ Task 6 ════"
+# Task 6 — the gate. Guard entries for scripts/reverify-guards.sh.
+#
+# Written to a separate file because a peer is running: concurrent appends to
+# reverify-guards.sh lose blocks. The controller merges these in.
+#
+# Every expression below quotes with Python DOUBLE quotes escaped as \", and
+# never with a single quote: `check` passes the expression as a single-quoted
+# shell word, so one apostrophe inside it ends the word and the rest of the
+# mutation reaches python as shell syntax. (`\x27` does not help -- it is an
+# escape only *inside* a Python string literal, and these appear outside one.)
+#
+# Two kinds of entry live here and the distinction matters.
+#
+#   1. ASSERTIONS. Disable the check, and one of the mutation bundles in
+#      tests/test_gate.py stops being caught. The bundle is the mutant; the
+#      entry proves the check is what catches it.
+#   2. CONTROLS. A positive control never fires against a healthy bundle, so
+#      disabling it turns nothing red -- which would make it look like a guard
+#      that does not bite. These entries therefore break the PROBE instead, and
+#      assert the control notices. Dropping `--network none` is the gate rule
+#      executed on the gate: before asserting isolation, prove the probe detects
+#      the thing when isolation is off.
+#
+# Scope is tests/test_gate.py for every entry (~36 s per run, six tests).
+# ---- assertions -------------------------------------------------------------
+# The failure une-tools' smoke-update.sh exists to catch. Without this line the
+# state-eating bundle installs, upgrades, answers HTTP and passes -- with the
+# client's data gone.
+check "T6 an upgrade that eats client state is caught" src/porter/gate.py \
+  's = s.replace("        r.check(after == want,", "        r.check(True,")' \
+  tests/test_gate.py
+# The control for the line above, and the reason the seed is hashed on the way
+# IN. If seeding silently does nothing, both digests are empty, empty equals
+# empty, and the gate reports state perfectly preserved.
+check "T6 a seed that never landed is not read as intact state" src/porter/gate.py \
+  's = s.replace("        r.check(before == want,", "        r.check(True,")' \
+  tests/test_gate.py
+# A 40 KB stub in which EVERY path assertion passes. This is the 30,912-byte
+# package that was reported as built during the design.
+check "T6 a truncated payload is caught by magnitude" src/porter/gate.py \
+  's = s.replace("    r.check(payload_prev >= min_payload_kb,", "    r.check(True,")' \
+  tests/test_gate.py
+# Overlaps the entry above ON THE SAME BUNDLE (trap 4) and asks a different
+# question: `du` asks how big the tree is, this asks whether the thing at the
+# shipped ExecStart is the interpreter the package carries. A dangling symlink
+# to the build host's own python is large AND wrong.
+check "T6 a stub interpreter cannot report itself as sys.executable" src/porter/gate.py \
+  's = s.replace("    r.check(_marker(out, \"PYEXE\") == interpreter and interpreter != \"\",", "    r.check(True,")' \
+  tests/test_gate.py
+# `1.9` sorts after `1.10` as a string and before it to dpkg. Lexically, the
+# gate installs the NEWER package, "upgrades" to the older one, finds every
+# seeded file untouched, and passes for an upgrade that never happened.
+check "T6 the upgrade path is ordered by dpkg, not lexically" src/porter/gate.py \
+  's = s.replace("    return sorted(set(found), key=functools.cmp_to_key(_dpkg_cmp))", "    return sorted(set(found))")' \
+  tests/test_gate.py
+# `health_url` is interpolated into the gate's own shell. `...; true` exits 0,
+# so the gate would report a healthy service with nothing listening -- a false
+# pass manufactured by the gate itself.
+check "T6 a health URL that could run shell is refused" src/porter/gate.py \
+  's = s.replace("    if not HEALTH_URL.match(health_url):", "    if False:")' \
+  tests/test_gate.py
+# ---- controls: break the probe, and assert the control notices --------------
+# THE GATE RULE, executed on the gate. Remove the airgap and the isolation
+# assertions must go red. Without this entry, `IFACES=lo` and `DNS=blocked`
+# would be two lines nothing has ever shown capable of failing.
+check "T6 CONTROL the isolation probe detects a container with a network" src/porter/gate.py \
+  's = s.replace("[\"docker\", \"run\", \"--rm\", \"--network\", \"none\",", "[\"docker\", \"run\", \"--rm\",")' \
+  tests/test_gate.py
+# The apt-source count taken BEFORE the wipe is what makes "no network source
+# remained" mean anything. Point the probe at a path that does not exist and it
+# reports a clean client either way -- the blind probe the count exists to
+# detect.
+check "T6 CONTROL a blind apt-source probe is not read as a clean client" src/porter/gate.py \
+  's = s.replace("echo \"NETSRC_BEFORE=$(cat /etc/apt/sources.list ", "echo \"NETSRC_BEFORE=$(cat /nonexistent ")' \
+  tests/test_gate.py
+# The install is bounded by `timeout`, and a hang is the failure that matters
+# most on an airgapped client -- at 3am it is indistinguishable from an install
+# still running. A `timeout` that does not fire makes that bound decorative.
+check "T6 CONTROL a timeout that does not fire is caught" src/porter/gate.py \
+  's = s.replace("timeout 1 sleep 5; echo \"TIMEOUTCTL=$?\"", "timeout 5 sleep 1; echo \"TIMEOUTCTL=$?\"")' \
+  tests/test_gate.py
+# "The install reached no prompt" is worthless under a harness that cannot
+# notice one. Discard the read probe's own result and the harness must declare
+# itself blind rather than report a clean install.
+check "T6 CONTROL a harness where an interactive read succeeds is refused" src/porter/gate.py \
+  's = s.replace("< /dev/null 2>/dev/null && echo \"TTYCTL=blind\"", "; true && echo \"TTYCTL=blind\"")' \
+  tests/test_gate.py
+# The negative control on the health URL: nothing may answer before the service
+# is started. Hand the gate a 0 there and it must refuse to treat the later 0 as
+# evidence that the shipped ExecStart did anything.
+check "T6 CONTROL a health URL answering before the start is refused" src/porter/gate.py \
+  's = s.replace("echo \"PREHEALTH_RC=$?\"", "echo \"PREHEALTH_RC=0\"")' \
+  tests/test_gate.py
+# Every marker check reads a transcript. Truncate it and they would all be
+# reading a log that stopped early, with "the marker is absent" meaning "the
+# container died" rather than "the assertion failed".
+check "T6 CONTROL a transcript that stops early is not read as a pass" src/porter/gate.py \
+  's = s.replace("echo \"DONE=yes\"", "echo \"DONE=no\"")' \
+  tests/test_gate.py
+
+echo "════ Task 12 ════"
+# Task 12 -- the `build:` escape hatch. Guard entries to be merged into
+# scripts/reverify-guards.sh by the controller (this wave's protocol keeps
+# several implementers out of that one file).
+#
+# NOTHING TO DELETE. The existing entry
+#
+#   check "T4 a non-empty stage root is refused, never emptied" src/porter/assemble.py \
+#     's = s.replace("if stage.exists() and any(stage.iterdir()):", "if False:")' tests/test_assemble.py
+#
+# still matches: that block moved into `assemble._open_an_empty_stage` and is
+# now shared by both paths, but its text is unchanged and there is still exactly
+# one copy of it. The T12 entry at the end of this file mutates the same line
+# with the hatch's own tests as the scope, which is the point of keeping both:
+# the mutation has to be red from either side or the helper is only guarded for
+# whichever caller happens to have a test.
+#
+# Every scope below is tests/test_escape_hatch.py, which needs no uv, no docker
+# and no interpreter download -- a hook component vendors nothing -- so these
+# entries are the cheapest in the registry (~3 s each).
+echo "════ Task 12 — the hatch runs, and the assembler does not ════"
+# Removed, `build:` is read by the loader, accepted, and then ignored: porter
+# assembles the component itself. Today that is loud (a hook component's kind
+# defaults to `custom`, which is not in SUPPORTED_KINDS, so the ordinary path
+# refuses it by name) -- but the symptom under test is the one that matters and
+# is checked directly: the hook's payload is not in the .deb. Trap 3: the
+# message this produces is incidental, the red is not.
+check "T12 a build: hook takes over the assemble stage" src/porter/assemble.py \
+  's = s.replace("    if component.build:", "    if False:")' \
+  tests/test_escape_hatch.py
+# Removed, a hook that fails AFTER writing part of its tree builds at rc=0 and
+# the truncated payload ships. The magnitude check below cannot see it -- the
+# stage is full of real bytes -- so this is the one guard with a test written
+# specifically to leave it alone in the room
+# (`test_a_hook_that_fails_after_writing_a_partial_tree_is_still_refused`).
+check "T12 the hook's rc is read, and a partial tree does not ship" \
+  src/porter/assemble.py \
+  's = s.replace("    if proc.returncode != 0:", "    if False:")' \
+  tests/test_escape_hatch.py
+# Removed, porter reports its own rc and swallows the script's diagnostic. The
+# build still fails, so this is a MESSAGE-ONLY mutation (Trap 4): what goes red
+# is the assertion that the hook's own stderr survived into porter's error, and
+# that is the whole of the brief's "non-zero rc aborts with its stderr
+# surfaced". A hook fails for reasons only the hook knows.
+check "T12 the hook's stderr is surfaced (MESSAGE ONLY -- see Trap 4)" \
+  src/porter/assemble.py \
+  's = s.replace("{proc.stderr.rstrip()}", "")' \
+  tests/test_escape_hatch.py
+echo "════ Task 12 — the magnitude check: a hook cannot produce nothing ════"
+# The whole check, removed at its call site. This is the entry that reproduces
+# the original symptom rather than an incidental error: porter packages an
+# empty tree into a .deb that installs cleanly at rc=0 and delivers no payload
+# at all, on a client with no network to notice from.
+check "T12 an empty stage from a hook is refused" src/porter/assemble.py \
+  's = s.replace("    _refuse_a_hook_that_produced_nothing(component, stage)", "    pass")' \
+  tests/test_escape_hatch.py
+# Magnitude, not existence -- the half that carries the standing rule. Removed,
+# a stage of files that all exist and none of which has anything in it builds
+# at rc=0. That is what a render step which failed halfway leaves behind, and
+# it passes every check that asks whether a path is there.
+check "T12 a stage of empty files is refused by bytes, not by entries" \
+  src/porter/assemble.py \
+  's = s.replace("    if total == 0:", "    if False:")' \
+  tests/test_escape_hatch.py
+# OVERLAPPING GUARD (Trap 4), reported rather than glossed. Removed on its own,
+# an empty stage is STILL refused -- by the byte check above, which a stage with
+# no files also fails. What goes red is the message: the adopter is told their
+# files total zero bytes when there are no files at all. Keep the entry, and do
+# not read it as evidence that this branch is load-bearing by itself.
+check "T12 a stage with no files at all names that (MESSAGE ONLY -- see Trap 4)" \
+  src/porter/assemble.py \
+  's = s.replace("    if not files:", "    if False:")' \
+  tests/test_escape_hatch.py
+echo "════ Task 12 — the guarantees the hatch does NOT bypass ════"
+# Removed, a hook's /etc files are not declared to dpkg. Today deb.py's lint
+# catches that and refuses the build (Trap 4: the two guards overlap and the
+# package does not ship either way), so what this mutation proves is that the
+# derivation and the lint agree. They have to: an undeclared conffile is an
+# admin's edited config replaced on every upgrade, with no prompt, no
+# .dpkg-dist and no record.
+check "T12 conffiles are derived from the tree a hook wrote" \
+  src/porter/assemble.py \
+  's = s.replace("    conffiles = _conffiles(stage)", "    conffiles = []")' \
+  tests/test_escape_hatch.py
+# Rule 11 through the hatch. Removed, a hook that stages a native binary ships
+# a package with no `Depends:` at all: it installs on the build host's twin and
+# fails to start on a client whose libc came from anywhere else.
+#
+# maxlines 4 DELIBERATELY: this line is textually identical to the assembler's
+# own, so the mutation disables both call sites. The scope is the hatch's tests,
+# which never reach the other one, so the verdict is still about the hook's --
+# but it is not a one-guard mutation and Trap 6 says to say so.
+check "T12 Depends: is derived from what a hook staged" src/porter/assemble.py \
+  's = s.replace("    depends = derive_depends(stage)", "    depends = []")' \
+  tests/test_escape_hatch.py 4
+# The stage a hook is handed is empty, from the hatch's side. Same line as the
+# T4 entry above and deliberately duplicated with a different scope: a shared
+# helper guarded only through one caller's tests is a helper that stops being
+# guarded the day that caller changes.
+check "T12 a hook does not build on top of someone else's tree" \
+  src/porter/assemble.py \
+  's = s.replace("if stage.exists() and any(stage.iterdir()):", "if False:")' \
+  tests/test_escape_hatch.py
+echo "════ Task 12 — the FHS lint, reached THROUGH a hook ════"
+# These six mutate deb.py, which Task 2 already guards, and they are here
+# anyway with a different scope. That is the whole claim of this task: the hatch
+# bypasses assembly, NOT the guarantees. A lint entry scoped only to
+# tests/test_deb.py proves the lint bites when deb.py is called directly; it says
+# nothing about whether a `build:` component reaches it at all. If any of these
+# goes green, `build:` is a way around the lint rather than a way around the
+# assembler -- and an adopter reaches for it exactly when their shape is unusual,
+# which is when the lint matters most.
+#
+# Verified by hand 2026-08-08 that the pairing is real and not assumed: with the
+# top-level allowlist disabled, `porter build` on a hook manifest wrote a .deb
+# carrying ./home/apiad/.ssh/id_rsa at rc=0.
+check "T12 the top-level allowlist applies to a hook's tree" src/porter/deb.py \
+  's = s.replace("if entry.name not in ALLOWED_TOP_LEVEL:", "if False:")' \
+  tests/test_escape_hatch.py
+check "T12 /etc/<pkg>/env is refused in a hook's tree" src/porter/deb.py \
+  's = s.replace("if p.exists() or p.is_symlink():", "if False:")' \
+  tests/test_escape_hatch.py
+check "T12 /var/lib is refused in a hook's tree" src/porter/deb.py \
+  's = s.replace("if p.exists() and any(p.rglob(\"*\")):", "if False:")' \
+  tests/test_escape_hatch.py
+check "T12 an absolute symlink is refused in a hook's tree" src/porter/deb.py \
+  's = s.replace("if target.is_absolute():", "if False:")' \
+  tests/test_escape_hatch.py
+check "T12 sh -n reads a hook's /usr/bin scripts" src/porter/deb.py \
+  's = s.replace("if probe.returncode != 0:", "if False:")' \
+  tests/test_escape_hatch.py
+# OVERLAPPING (Trap 4), and Task 2 recorded the same overlap: a pre-staged
+# DEBIAN/ is also caught by the top-level allowlist, so removing this alone
+# still refuses the build. The message is what goes red -- and it is the useful
+# half, because it tells a hook author to pass scripts= rather than that
+# /DEBIAN is a path porter does not own.
+check "T12 a hook may not stage DEBIAN/ (MESSAGE ONLY -- see Trap 4)" \
+  src/porter/deb.py \
+  's = s.replace("if debian.exists() or debian.is_symlink():", "if False:")' \
+  tests/test_escape_hatch.py
+echo "════ Task 12 — the keys the hatch makes porter stop reading ════"
+# Removed, `source:`/`env:`/`admin_keys:` and the rest are accepted beside a
+# `build:` and read by nothing. `admin_keys` is the expensive one: no
+# <pkg>-setup is written, /etc/<pkg>/env is never created, and an operator is
+# left looking for a wizard the manifest promised. All of them build, lint and
+# install at rc=0.
+check "T12 assembler keys beside a hook are refused (loader)" src/porter/spec.py \
+  's = s.replace("    declared = sorted(set(written) & ASSEMBLER_ONLY_KEYS)", "    declared = []")' \
+  tests/test_escape_hatch.py
+# The same refusal one layer in, and it is not redundant: most of this suite
+# builds a `Component` in Python and never opens a YAML file, so a refusal that
+# lived only in the loader is one every in-process caller walks past -- and then
+# the behaviour the suite pins is not the behaviour the tool has.
+check "T12 assembler keys beside a hook are refused (in-process)" \
+  src/porter/assemble.py \
+  's = s.replace("    if declared:", "    if False:")' \
+  tests/test_escape_hatch.py
+# `custom` is what a hook component's absent `kind:` defaults to. Added to
+# SUPPORTED_KINDS it stops being refused on the ORDINARY path, so a component
+# that reaches the assembler carrying it is staged as whichever branch porter
+# guessed -- a payload with neither a unit nor a wrapper.
+check "T12 'custom' is not a kind porter assembles" src/porter/assemble.py \
+  's = s.replace("SUPPORTED_KINDS = (\"service\", \"command\", \"oneshot\")", "SUPPORTED_KINDS = (\"service\", \"command\", \"oneshot\", \"custom\")")' \
+  tests/test_escape_hatch.py
+# Removed, `build: bulid.sh` reaches bash, which reports rc=127 about an
+# absolute path with no hint of what it was resolved against. OVERLAPPING
+# (Trap 4): the build still fails, via the rc check. Message only -- but the
+# message is the whole value, since `build:` is relative to the manifest's
+# directory and nothing else in porter says so.
+check "T12 a missing hook script is named (MESSAGE ONLY -- see Trap 4)" \
+  src/porter/assemble.py \
+  's = s.replace("    if not script.is_file():", "    if False:")' \
+  tests/test_escape_hatch.py
 echo
 echo "════ control: suite green again after every restore ════"
 purge; final=$(run); echo "  restored rc=$final"
