@@ -6,7 +6,9 @@
 
 **Architecture:** Seven tasks, vertically sliced. Task 1 vendors a relocatable CPython; Task 2 turns a staged tree into a `.deb`; **Task 3 is the end-to-end moment** — `examples/service-fastapi` answering HTTP from an installed package under a real systemd unit; Task 4 adds the USB apt repo and the upgrade path; Task 5 adds the gate; Task 6 fills in the rest of the gallery; Task 7 adds the desktop shape and the derived-`Depends:` mechanism it needs.
 
-**Why examples before a real app.** The gallery is a shipped feature, not scaffolding: it is porter's documentation *and* its regression suite. Every example is a gate fixture, so each packaging shape is exercised on every build, and a new consumer starts by copying the example nearest its shape rather than reading a schema. It also keeps slice 1 free of any cross-repo dependency — `une-sigere-api` is slice 2, and by then every mechanism it needs has been proven against something we control.
+**Why examples before a real app.** The gallery is a shipped feature, not scaffolding: it is porter's documentation *and* its regression suite. Every example is a gate fixture, so each packaging shape is exercised on every build, and a new consumer starts by copying the example nearest its shape rather than reading a schema. 
+
+**Nothing in this plan reaches outside this repository.** porter's plan implements porter. Adopting it in any consumer repo is that repo's work, planned and executed there once porter is proven — a packaging tool whose own plan depends on a consumer has the coupling backwards.
 
 **Tech Stack:** Python 3.12+, `microcli-toolkit` (CLI), `pyyaml`, `uv` (fetches python-build-standalone), `dpkg-deb`, Docker (build/test only), `systemd-nspawn` (gate).
 
@@ -383,27 +385,32 @@ fixture every later task reuses.
 from porter.config import split, env_postinst
 from porter.systemd import unit
 
-TEMPLATE = {"SIGERE_PORT": "8095", "SIGERE_DB_TDS_VERSION": "7.0", "SIGERE_DB_HOST": "", "SIGERE_DB_PASSWORD": ""}
-ADMIN = ["SIGERE_DB_HOST", "SIGERE_DB_PASSWORD"]
+# A tuning constant plus two secrets -- the shape every real service has.
+# DB_TDS_VERSION stands in for the case that motivates the whole split: a value
+# WE discover and correct later (a driver protocol version measured against an
+# old server, say). Package-owned, it reaches every client on upgrade; in a
+# single-file scheme a client who had edited their config could never receive it.
+TEMPLATE = {"PORT": "9000", "DB_TDS_VERSION": "7.0", "DB_HOST": "", "DB_PASSWORD": ""}
+ADMIN = ["DB_HOST", "DB_PASSWORD"]
 
 
 def test_defaults_holds_package_owned_keys_only():
     defaults, _ = split(TEMPLATE, ADMIN)
-    assert "SIGERE_DB_TDS_VERSION=7.0" in defaults
-    assert "SIGERE_PORT=8095" in defaults
-    assert "SIGERE_DB_HOST" not in defaults
+    assert "DB_TDS_VERSION=7.0" in defaults
+    assert "PORT=9000" in defaults
+    assert "DB_HOST" not in defaults
 
 
 def test_env_holds_admin_keys_as_empty_placeholders():
     _, env = split(TEMPLATE, ADMIN)
-    assert "SIGERE_DB_HOST=" in env
-    assert "SIGERE_DB_PASSWORD=" in env
-    assert "SIGERE_DB_TDS_VERSION" not in env
+    assert "DB_HOST=" in env
+    assert "DB_PASSWORD=" in env
+    assert "DB_TDS_VERSION" not in env
 
 
 def test_postinst_creates_env_only_if_absent_and_never_prompts():
-    body = env_postinst("une-sigere-api")
-    assert "[ -f /etc/une-sigere-api/env ]" in body
+    body = env_postinst("porter-example-service")
+    assert "[ -f /etc/porter-example-service/env ]" in body
     assert "chmod 600" in body
     for interactive in ("read ", "debconf", "db_input"):
         assert interactive not in body, f"postinst must never prompt: found {interactive!r}"
@@ -412,23 +419,23 @@ def test_postinst_creates_env_only_if_absent_and_never_prompts():
 def test_unit_uses_a_static_user_not_dynamicuser():
     """DynamicUser puts state in /var/lib/private/<pkg> at 700 root:root, which
     a non-root operator cannot read or list. Measured 2026-08-07."""
-    u = unit("une-sigere-api", "SIGERE API", "/x/python3.12 -m uvicorn a:app", "/x")
+    u = unit("porter-example-service", "Example service", "/x/python3.12 -m uvicorn a:app", "/x")
     assert "DynamicUser" not in u
-    assert "User=une-sigere-api" in u
-    assert "Group=une-sigere-api" in u
+    assert "User=porter-example-service" in u
+    assert "Group=porter-example-service" in u
 
 
 def test_postinst_creates_the_system_user_and_restarts_on_upgrade():
-    body = env_postinst("une-sigere-api")
+    body = env_postinst("porter-example-service")
     assert "useradd --system" in body
     assert "try-restart" in body
 
 
 def test_unit_loads_defaults_then_env_so_admin_wins():
-    u = unit("une-sigere-api", "SIGERE API", "/usr/lib/x/python/bin/python3.12 -m uvicorn a:app", "/usr/lib/x")
+    u = unit("porter-example-service", "Example service", "/usr/lib/x/python/bin/python3.12 -m uvicorn a:app", "/usr/lib/x")
     lines = u.splitlines()
-    d = lines.index("EnvironmentFile=/etc/une-sigere-api/defaults")
-    e = lines.index("EnvironmentFile=-/etc/une-sigere-api/env")
+    d = lines.index("EnvironmentFile=/etc/porter-example-service/defaults")
+    e = lines.index("EnvironmentFile=-/etc/porter-example-service/env")
     assert d < e, "admin env must be read last so it overrides defaults"
 ```
 
@@ -1294,7 +1301,7 @@ from porter.desktop import launcher, desktop_entry
 
 
 def test_launcher_probes_browsers_in_order_and_uses_app_mode():
-    body = launcher("ainbox", "http://127.0.0.1:8080", "/health", "AInBox")
+    body = launcher("porter-example-desktop", "http://127.0.0.1:9200", "/health", "PorterDemo")
     order = [body.index(b) for b in ("google-chrome", "chromium", "brave-browser")]
     assert order == sorted(order), "browser probe order is not deterministic"
     assert "--app=" in body
@@ -1305,21 +1312,21 @@ def test_launcher_probes_browsers_in_order_and_uses_app_mode():
 def test_launcher_waits_for_health_before_opening():
     """Clicking the icon right after login must not show connection-refused
     while systemd is still bringing the stack up."""
-    body = launcher("ainbox", "http://127.0.0.1:8080", "/health", "AInBox")
+    body = launcher("porter-example-desktop", "http://127.0.0.1:9200", "/health", "PorterDemo")
     assert "/health" in body
     assert body.index("/health") < body.index("--app="), "opens before waiting"
 
 
 def test_launcher_uses_an_isolated_profile():
-    body = launcher("ainbox", "http://127.0.0.1:8080", "/health", "AInBox")
+    body = launcher("porter-example-desktop", "http://127.0.0.1:9200", "/health", "PorterDemo")
     assert "--user-data-dir=" in body
-    assert ".local/share/ainbox" in body
+    assert ".local/share/porter-example-desktop" in body
 
 
 def test_desktop_entry_is_valid(tmp_path):
     import shutil, subprocess
-    entry = tmp_path / "ainbox.desktop"
-    entry.write_text(desktop_entry("ainbox", "AInBox", "ainbox"))
+    entry = tmp_path / "porter-example-desktop.desktop"
+    entry.write_text(desktop_entry("porter-example-desktop", "PorterDemo", "porter-example-desktop"))
     if shutil.which("desktop-file-validate"):
         proc = subprocess.run(["desktop-file-validate", str(entry)],
                               capture_output=True, text=True)
@@ -1471,15 +1478,14 @@ git commit -m "feat(desktop): chromeless launcher, .desktop entry, derived Depen
 
 Named so they are decisions, not omissions:
 
-- **`une-sigere-api`, and every real app.** Slice 2. The gallery proves each
-  mechanism against something we control first; a real migration should not be
-  where a packaging bug is discovered. By then `sigere-api` needs no new
-  machinery — it is the `service` shape with a `constraints:` file.
-- **`python.package: shared`.** Slice 1 only implements `bundled`, which vendors the interpreter inside `une-sigere-api` (~97 MB duplicated the moment a second component exists). Emitting a separate interpreter package — named by the project, not by porter — is slice 2, once there are two consumers to prove the `Depends:` actually resolves offline.
+- **Adopting porter anywhere.** Out of scope by construction, not by sequencing:
+  migrating a repo onto porter is that repo's work, planned and executed there.
+  This plan builds the tool.
+- **`python.package: shared`.** Slice 1 implements `bundled` only, which vendors the interpreter inside each component (~97 MB duplicated the moment a project has two). Emitting a separate interpreter package — named by the project, not by porter — is a later porter slice; `examples/suite` is the fixture that will prove the `Depends:` resolves offline.
 - **`<app>-setup`**, the interactive first-run wizard. Slice 1 seeds `/etc/<pkg>/env` with empty placeholders; the sysadmin edits it by hand, exactly as today.
-- **`systemd-nspawn` gating.** Task 5 gates in Docker with `--network none`, which proves the payload, the upgrade and client-state survival but *not* the unit under real systemd. nspawn arrives with slice 2.
+- **`systemd-nspawn` gating.** Task 5 gates in Docker with `--network none`, which proves the payload, the upgrade and client-state survival but *not* the unit under real systemd. A later porter slice.
 - **GPG signing** of the repo (`[trusted=yes]` for now), the bwrap sandbox, and metapackages for UNE's two machines.
-- **The `<app>-desktop` package** — chromeless browser, `.desktop` entry, icon, isolated profile. `sigere-api` is a headless service with no UI, so it cannot exercise any of it; that work belongs to the AInBox slice, where a near-native window is the point. What slice 1 *does* establish for it is the auto-derived `Depends:` mechanism, which the browser bundle needs and `sigere-api` does not.
+- **A bundled browser.** Task 7 ships the desktop shape with `browser: system` (probe what the client has), which needs no download and no licence decision. `browser: {source, sha256}` — pinning a Chromium build — waits until that artifact has been verified against its terms.
 
 ## Self-review
 

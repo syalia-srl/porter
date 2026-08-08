@@ -373,6 +373,12 @@ covers every future native payload without anyone remembering to update a list.
 
 ### The sandbox: bwrap, not Docker
 
+> **Consumer-side, not a porter feature.** This section and the next record
+> consequences of dropping Docker for apps that use it as more than packaging.
+> The work is designed and executed in those repos; porter neither knows nor
+> cares. They are here because the measurements were taken during this design
+> and would otherwise be lost.
+
 `apps/sandbox` is the only place Docker is the *product*. Its API surface is six
 operations, all covered (each verified behind a positive control proving the
 probe detects the thing when isolation is off):
@@ -509,17 +515,27 @@ Named rather than resolved, with the evidence that exists:
   interactively as a normal user with password-gated sudo gets an explicit error,
   not a password prompt.
 
-## Migration order
+## Adoption
 
-Thinnest end-to-end slice first, hardest client first: **une-tools `sigere-api`**.
-It is already native (13 MB relocatable tree), already has an update contract and
-an update smoke test, and ships to a real client on a real schedule — so
-converting it proves conffile handling, apt-repo update and systemd against the
-hardest real customer with the smallest payload, and retires the most hand-rolled
-machinery per line of code. Then transforma-cuba/leyes-cuba (one shared shape,
-two consumers), then une-tools' remaining components, then ainbox last — it needs
-the sandbox rewrite and is the only one that gains a new subsystem rather than
-losing one.
+**Not porter's work, and deliberately not planned here.** Migrating a repo onto
+porter is that repo's job, planned and executed in that repo, once porter is
+proven against its own example gallery. A packaging tool whose plan depends on a
+consumer has the coupling backwards, and a real migration is the worst place to
+discover a packaging bug.
+
+What porter owes an adopter is a gallery entry matching its shape, so adoption
+starts by copying a working example rather than reading a schema:
+
+| shape | example |
+|---|---|
+| HTTP service, systemd unit, split config | `examples/service-fastapi` |
+| CLI tool, no service | `examples/command` |
+| scheduled job | `examples/oneshot-timer` |
+| several components, one install per machine | `examples/suite` |
+| near-native desktop app | `examples/desktop-app` |
+
+If a repo's shape is missing from that table, the gap is porter's to close —
+that, and only that, is what a consumer's needs create here.
 
 ## See also
 
