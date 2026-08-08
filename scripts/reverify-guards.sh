@@ -1066,6 +1066,270 @@ check "T12 a missing hook script is named (MESSAGE ONLY -- see Trap 4)" \
   src/porter/assemble.py \
   's = s.replace("    if not script.is_file():", "    if False:")' \
   tests/test_escape_hatch.py
+echo "════ Task 13 ════"
+# Task 13 -- the shared interpreter package, and bundled native binaries.
+# Guard entries to be merged into scripts/reverify-guards.sh by the controller
+# (this wave's protocol keeps several implementers out of that one file).
+#
+# NOTHING TO DELETE, ONE TO REWRITE. The existing entry for Task 4's
+# non-bundled refusal
+#
+#   check "T4 an interpreter porter does not bundle is refused" ...
+#
+# does not exist in the registry today (Task 4's guards covered the kind,
+# stage-root and import-probe refusals), so nothing has to be removed. But
+# `tests/test_assemble.py::test_refuses_an_interpreter_it_does_not_bundle` is
+# gone: `python.package: <name>` is a real shape now. Its replacement is
+# `test_refuses_a_shared_interpreter_nobody_built`, guarded below.
+#
+# Scopes. Two files, and both are cheap relative to what they cover:
+#   tests/test_shared_interpreter.py  ~1 interpreter vendored, session-scoped,
+#                                     plus one `porter build` of the example and
+#                                     two containers  (~25 s)
+#   tests/test_native_binary.py       cc twice per test, one vendored tree per
+#                                     assembling test, one container  (~20 s)
+# tests/test_assemble.py is used for the one refusal that lives there.
+#
+# TRAP 3 NOTE, applying to every entry below: porter's characteristic bug is
+# silent success, so each mutation is chosen to reproduce THAT and not merely to
+# raise somewhere. The two exceptions are called out where they occur.
+echo "════ Task 13 — the shared interpreter is a package, and it is depended on ════"
+# THE entry. Removed, the component builds and installs perfectly and does not
+# ask for the interpreter at all: apt resolves nothing, /usr/lib/<interp>/ is
+# absent on the client, and ExecStart names a path that does not exist. The
+# offline e2e is what goes red -- `dpkg-query` cannot find the interpreter
+# package -- which is the original symptom exactly.
+check "T13 a component Depends: on the shared interpreter, by exact version" \
+  src/porter/assemble.py \
+  's = s.replace("depends.insert(0, interpreter.exact_dependency)", "pass")' \
+  tests/test_shared_interpreter.py
+# Removed, a component's requirements are installed into the SHARED
+# interpreter's site-packages. That BUILDS and RUNS for one component -- which
+# is why it needs a guard rather than a test that happens to notice: the failure
+# only appears with a second component wanting the same wheel (a dpkg file
+# conflict at the client) or with a rebuild that changes them (97 MB churn).
+check "T13 requirements go to the payload root, never the shared interpreter" \
+  src/porter/assemble.py \
+  's = s.replace("install(python_bin, component.requirements, target=libdir)", "install(python_bin, component.requirements)")' \
+  tests/test_shared_interpreter.py
+# Removed, uv's console scripts ship. Their shebangs are absolute build-host
+# paths (rule 3), so /usr/lib/<pkg>/bin/uvicorn is a file that looks runnable on
+# the client and is not.
+check "T13 uv's console scripts and lock do not ship" src/porter/assemble.py \
+  's = s.replace("shutil.rmtree(libdir / \"bin\", ignore_errors=True)", "pass")' \
+  tests/test_shared_interpreter.py
+# Removed, a caller that declares a shared interpreter and builds none falls
+# through to... nothing coherent. Before Task 13 this was refused as "not
+# implemented"; the shape is real now and the refusal guards the incoherent half.
+check "T13 a shared interpreter nobody built is refused" src/porter/assemble.py \
+  's = s.replace("if interpreter is None:", "if False:")' \
+  tests/test_assemble.py
+# Removed, a component declaring `bundled` and handed a shared interpreter
+# bundles anyway: a package that works and is 97 MB larger than the manifest
+# asked for, with every sibling depending on a package nothing produced.
+check "T13 bundled beside a shared interpreter is refused" src/porter/assemble.py \
+  's = s.replace("if python.bundled and interpreter is not None:", "if False:")' \
+  tests/test_shared_interpreter.py
+# Removed, the component Depends: on one package and ExecStarts the path of
+# another -- an install apt resolves happily and a service that cannot start.
+check "T13 an interpreter built for another package is refused" src/porter/assemble.py \
+  's = s.replace("if interpreter.package != python.package:", "if False:")' \
+  tests/test_shared_interpreter.py
+check "T13 an interpreter built for another version is refused" src/porter/assemble.py \
+  's = s.replace("if interpreter.python_version != python.version:", "if False:")' \
+  tests/test_shared_interpreter.py
+# Removed, uv is asked for 3.12, answers with whatever it has, and the whole
+# project's exact Depends: is built on the wrong number at once.
+check "T13 the staged tree really is the declared version" src/porter/assemble.py \
+  's = s.replace("if not full.startswith(f\"{declared}.\"):", "if False:")' \
+  tests/test_shared_interpreter.py
+# Removed, one interpreter package name with two versions builds whichever was
+# staged last and the other component's ExecStart names a python that is not in
+# it. dpkg-deb resolves nothing, so the build is happy.
+check "T13 one interpreter name may not hold two versions" src/porter/spec.py \
+  's = s.replace("if seen is not None and seen.version != python.version:", "if False:")' \
+  tests/test_shared_interpreter.py
+# Removed, the interpreter package and a component write to one .deb filename
+# and the second overwrites the first, silently, at rc=0.
+check "T13 an interpreter name a component claims is refused" src/porter/spec.py \
+  's = s.replace("if python.package in package_names:", "if False:")' \
+  tests/test_shared_interpreter.py
+echo "════ Task 13 — native binaries, and the Depends: derived from them ════"
+# Removed, a native binary linking a soname NOTHING provides builds at rc=0 with
+# a Depends: short by exactly the entry that mattered, and dies at its first
+# exec on a client with no network to fix it from.
+check "T13 a native binary whose libraries do not resolve is refused" \
+  src/porter/depends.py \
+  's = s.replace("\n        if missing:", "\n        if False:")' \
+  tests/test_native_binary.py
+# Removed, the payload's OWN libraries reach Depends: -- apt on an airgapped
+# client is asked for `libporterprobe.so.1`, a package no mirror has ever
+# carried. TRAP 3 APPLIES: on this fixture the mutation goes red as a build-time
+# resolve failure rather than as a bad Depends:, because the build host cannot
+# resolve the payload's private soname either. The shipped symptom (an
+# unsatisfiable Depends:) needs a soname that DOES resolve on the build host and
+# not on the client, which no fixture here can stage. The exclusion is real
+# either way; the failure mode observed is not the shipped one.
+check "T13 sonames the payload ships itself are excluded from Depends:" \
+  src/porter/depends.py \
+  's = s.replace("external = sorted(so for so in needed if PurePosixPath(so).name not in own)", "external = sorted(needed)")' \
+  tests/test_native_binary.py
+# Removed, a binary staged 644 installs at rc=0 and fails with "Permission
+# denied" at its first exec, file present and exactly the right size.
+check "T13 a non-executable native binary is refused" src/porter/assemble.py \
+  's = s.replace("if \".so\" not in path.name and not path.stat().st_mode & 0o111:", "if False:")' \
+  tests/test_native_binary.py
+# Removed, copy2 becomes copyfile and porter itself drops the exec bit -- the
+# same client symptom, arriving through porter rather than through the adopter.
+check "T13 the exec bit survives staging" src/porter/assemble.py \
+  's = s.replace("is the difference between a program and a file.\n        shutil.copy2(src, dest)", "is the difference between a program and a file.\n        shutil.copyfile(src, dest)")' \
+  tests/test_native_binary.py
+# Removed, a shell script declared as a native binary contributes no NEEDED
+# entries -- truthfully -- and everything it really needs goes undeclared. Rule
+# 11's failure with every check apparently passing.
+check "T13 a native binary that is not an ELF object is refused" \
+  src/porter/assemble.py \
+  's = s.replace("if fh.read(4) != ELF_MAGIC:", "if False:")' \
+  tests/test_native_binary.py
+# Removed, `native_binaries: [build/probe]` before the step that compiles it is
+# a manifest whose payload does not exist, reported as a FileNotFoundError from
+# shutil naming a staging path the adopter has never seen.
+check "T13 a native binary that is not there is refused" src/porter/assemble.py \
+  's = s.replace("if not path.is_file():", "if False:")' \
+  tests/test_native_binary.py
+# Removed, four different things write into /usr/lib/<pkg>/ and a basename
+# collision between any two of them is silent: copy2 overwrites, and onto a
+# DIRECTORY it writes the file inside -- so `source: [python]` lands in the
+# interpreter tree and the module is not importable at all.
+check "T13 two things staged under one basename are refused" src/porter/assemble.py \
+  's = s.replace("if dest.exists():", "if False:")' \
+  tests/test_native_binary.py
+
+echo "════ Task 14 ════"
+# Task 14 -- the nspawn gate and the signed repo. Guard entries to be merged
+# into scripts/reverify-guards.sh by the controller (this wave's protocol keeps
+# several implementers out of that one file).
+#
+# NOTHING TO DELETE. No existing entry mutates src/porter/gate.py's nspawn half
+# or src/porter/repo.py's signing half -- neither existed before this task.
+#
+# TWO SCOPES, and they cost very differently:
+#
+#   tests/test_signing.py      ~6 s   (tiny .debs, docker, no interpreter)
+#   tests/test_nspawn_gate.py  ~180 s (three systemd boots + a 97 MB package)
+#
+# The nspawn entries are the most expensive in the registry. They are also the
+# only ones whose subject is a unit systemd actually started, so they are not
+# optional. Budget ~20 minutes for the eight of them.
+#
+# Every nspawn entry below neuters ONE `r.check(...)` inside `nspawn_gate` by
+# replacing its condition with `True`. That is the use site, not a constant
+# (trap 2): the check still runs, still formats its message, and simply cannot
+# fail -- which is precisely the shape of the bug this registry exists to find.
+echo "════ Task 14 — the signed repo ════"
+# The whole of property 3. Force the unsigned template and a signed tree's
+# install.sh goes back to trusting its own source: apt then accepts a rewritten
+# index, and test_a_rewritten_index_..[True] installs the attacker's payload.
+check "T14 a signed tree never emits the unverified-source template" \
+  src/porter/repo.py \
+  's = s.replace("trust = (TRUST_SIGNED if sign_key is not None else TRUST_UNSIGNED).format(", "trust = (TRUST_UNSIGNED).format(")' \
+  tests/test_signing.py
+# `gpg --export <pattern>` with a pattern that matches nothing exits 0 and
+# writes NOTHING. Without the magnitude floor the stick ships a zero-byte
+# keyring, usb_tree returns happily, and the install dies at the client with
+# `no valid OpenPGP data found` -- on a machine with no network to fix it from.
+check "T14 the exported public key must be real, not zero bytes" \
+  src/porter/repo.py \
+  's = s.replace("if exported.returncode != 0 or len(exported.stdout) < 100:", "if False:")' \
+  tests/test_signing.py
+# Removed, sign_release ships a signature it never checked against the key it
+# ships beside it. test_a_keyring_that_does_not_match_the_signature_is_refused
+# calls the verifier directly with a second key's export, which is the only way
+# to make this fail -- on the build path the two always match, which is the
+# point of the check.
+check "T14 the shipped key must verify the shipped signature" \
+  src/porter/repo.py \
+  's = s.replace("        if ok.returncode != 0:", "        if False:")' \
+  tests/test_signing.py
+# A signature over a Release that no longer exists is worse than none: the
+# directory looks signed to anybody who lists it and verifies for nobody.
+check "T14 re-indexing unsigned removes the stale signature" \
+  src/porter/repo.py \
+  's = s.replace("for residue in (\"Release.gpg\", \"InRelease\", KEYRING_NAME):", "for residue in ():")' \
+  tests/test_signing.py
+echo "════ Task 14 — the nspawn gate ════"
+# THE claim of the whole task: the unit reached active. Neutered, MUTATION 1 --
+# a bundle whose ExecStart names a module that is not there -- installs at rc=0
+# and the gate reports a pass on a service that never ran.
+check "T14 the unit must reach active" src/porter/gate.py \
+  's = s.replace("r.check(_marker(o, \"ACTIVE\") == \"active\",", "r.check(True,")' \
+  tests/test_nspawn_gate.py
+# ActiveState alone cannot tell a service that came up from one in a restart
+# loop: with no Type=, systemd reports `active (running)` the instant the fork
+# succeeds. Measured 2026-08-08 -- MUTATION 1's process lives ~25 ms and the
+# gate's wait loop DID break on that transient.
+check "T14 SubState must be running, not auto-restart" src/porter/gate.py \
+  's = s.replace("r.check(_marker(o, \"SUBSTATE\") == \"running\",", "r.check(True,")' \
+  tests/test_nspawn_gate.py
+check "T14 the unit must not already be flapping before the kill" \
+  src/porter/gate.py \
+  's = s.replace("r.check(_int(o, \"NRESTARTS_PRE\") == 0,", "r.check(True,")' \
+  tests/test_nspawn_gate.py
+# The four directives systemd-analyze verify CANNOT check, because it reports
+# keys it does not recognise and never keys that are missing (measured
+# 2026-08-08: deleting ProtectSystem=strict leaves it clean). MUTATION 2 is a
+# unit with each of these removed that installs, starts and answers.
+check "T14 systemd must have loaded User=" src/porter/gate.py \
+  's = s.replace("r.check(_marker(o, \"SHOW_USER\") == app,", "r.check(True,")' \
+  tests/test_nspawn_gate.py
+check "T14 systemd must have loaded ProtectSystem=strict" src/porter/gate.py \
+  's = s.replace("r.check(_marker(o, \"SHOW_PROTECT\") == \"strict\",", "r.check(True,")' \
+  tests/test_nspawn_gate.py
+check "T14 systemd must have loaded Restart=on-failure" src/porter/gate.py \
+  's = s.replace("r.check(_marker(o, \"SHOW_RESTART\") == \"on-failure\",", "r.check(True,")' \
+  tests/test_nspawn_gate.py
+# ...and that User= took EFFECT, not merely parsed. Read off /proc/<mainpid>,
+# which the kernel owns by the process's real user.
+check "T14 the running process must belong to the service user" src/porter/gate.py \
+  's = s.replace("r.check(_marker(o, \"MAINUSER\") == app,", "r.check(True,")' \
+  tests/test_nspawn_gate.py
+# Restart=on-failure demonstrated rather than declared: SIGKILL the main process
+# and systemd must put a DIFFERENT one back. A unit file saying on-failure and a
+# unit systemd actually restarts are identical on disk.
+check "T14 systemd must actually replace a killed process" src/porter/gate.py \
+  's = s.replace("    r.check(newpid > 0 and newpid != mainpid,", "    r.check(True,")' \
+  tests/test_nspawn_gate.py
+# ---------------------------------------------------------------------------
+# DELIBERATELY NOT ENTERED, and why. Reporting these matters more than padding
+# the count: an implementer who lists them as guarded leaves the next reader
+# believing a check is load-tested when it is not.
+#
+# * `PROTECT_BLOCKS_RC` / `PROTECT_CONTROL_RC` -- the pair that proves
+#   ProtectSystem=strict blocks a write on THIS kernel. Neutering either leaves
+#   every test green: no bundle in the suite can make a loaded `strict` fail to
+#   be enforced, because that would take a broken kernel or a broken nspawn.
+#   The pair is self-controlling at run time instead (the control must pass on a
+#   transient unit with no sandboxing while the subject fails), which is the
+#   best available and is not the same as a registry entry.
+#
+# * `_verify_with_the_shipped_key`'s tamper control (`if control.returncode == 0`)
+#   -- it can only fire if gpgv fails open. Nothing in the suite can arrange
+#   that without replacing gpgv, so it has no entry. It is a control on a
+#   control and is documented as such.
+#
+# * The magnitude floor on the nspawn payload (`PAYLOAD_KB`) -- OVERLAPPING
+#   (trap 4). A package small enough to trip it has no interpreter, so its
+#   service never starts and the ACTIVE check goes red first. The isolated
+#   guard for payload magnitude is the docker gate's `truncated_usb`, which
+#   truncates v_prev only so the upgrade repairs the tree and size is the sole
+#   red. That entry already exists; this one would duplicate it badly.
+#
+# * The three before-controls (`PREHEALTH_RC`, `PRESTATE`, `PREUSER`) -- same
+#   shape. They assert that the base image does NOT already have the thing, and
+#   no bundle can make a clean Debian root grow a demo-app user before install.
+#   They are what make the after-checks meaningful and they are unfalsifiable
+#   from inside the suite; a registry entry would report PASS for the wrong
+#   reason or FAIL always.
 echo
 echo "════ control: suite green again after every restore ════"
 purge; final=$(run); echo "  restored rc=$final"
