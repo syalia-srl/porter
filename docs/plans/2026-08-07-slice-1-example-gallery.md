@@ -298,9 +298,14 @@ from pathlib import Path
 
 # Paths the package must never own. This is une-tools' bin/_check-staged.sh,
 # generalised and enforced at build time for every component.
+# __pycache__ is deliberately NOT junk. Every python-build-standalone tree ships
+# them, so rejecting them would refuse every stage carrying a vendored
+# interpreter -- the failure would have surfaced in Task 3, not here. They are
+# also harmless to ship: CPython validates .pyc against source mtime and size,
+# and pre-warmed caches speed the first start on the client.
 CLIENT_OWNED = ("var/lib", "var/log")
 NEVER_SHIPPED = ("env",)          # basename, under etc/<pkg>/
-JUNK = ("__pycache__", ".git", ".env", ".venv")
+JUNK = (".venv", ".git", ".env")
 
 
 def _lint(stage: Path) -> None:
