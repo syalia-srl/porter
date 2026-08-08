@@ -21,13 +21,58 @@ def _run(cmd: list[str]) -> str:
     return proc.stdout.strip()
 
 
+def _standalone_root(found: Path, version: str) -> Path:
+    """Derive the python-build-standalone root from an interpreter path, and
+    refuse anything that is not one.
+
+    `uv python find` answers with the interpreter uv would *use*, and that
+    includes a virtualenv -- the active `$VIRTUAL_ENV`, or one merely
+    discovered in the cwd -- whenever its version satisfies the request.
+    Measured on zion 2026-08-07 with uv 0.11.29: from a directory holding a
+    3.12 `.venv`, `uv python find 3.12` returned `.venv/bin/python3`. Two
+    directories up from that is the venv itself, so vendoring it would copy a
+    tree whose `bin/python3.12` is an absolute symlink into the build host --
+    precisely the failure rule 1 exists to prevent -- and it would do so
+    silently, shipping a wrong package rather than raising.
+
+    `--system --managed-python` on the find call is the primary defence. This
+    check is the one that still holds if a future uv changes that behaviour,
+    or if someone rewrites the call and drops the flags.
+
+    The obvious probes are not sufficient on their own: a venv *has*
+    `bin/python<version>` and `lib/python<version>/`. What it has that a
+    standalone tree does not is `pyvenv.cfg`; what it lacks is the stdlib --
+    its `lib/python<version>/` holds only `site-packages`.
+    """
+    root = found.parent.parent
+    if (root / "pyvenv.cfg").exists():
+        raise RuntimeError(
+            f"refusing to vendor {root}: it is a virtualenv (pyvenv.cfg present), "
+            f"not a python-build-standalone tree. `uv python find {version}` "
+            f"resolved to {found}."
+        )
+    libdir = root / "lib" / f"python{version}"
+    for probe in (root / "bin" / f"python{version}", libdir, libdir / "os.py"):
+        if not probe.exists():
+            raise RuntimeError(
+                f"refusing to vendor {root}: not a python-build-standalone tree "
+                f"({probe} is missing). `uv python find {version}` resolved to {found}."
+            )
+    return root
+
+
 def vendor(dest: Path, version: str = DEFAULT_VERSION) -> Path:
     """Materialise a relocatable CPython at dest/python. Returns the binary."""
     dest = Path(dest)
     dest.mkdir(parents=True, exist_ok=True)
     _run(["uv", "python", "install", version])
-    found = Path(_run(["uv", "python", "find", version]))
-    src = found.parent.parent  # .../cpython-3.12-linux-x86_64-gnu
+    # --system excludes virtualenvs; --managed-python excludes anything uv did
+    # not install (without it, --system happily answers /usr/bin/python3.N,
+    # whose root is /usr). Neither --no-project nor unsetting $VIRTUAL_ENV is
+    # enough -- both were measured returning the cwd's venv. See
+    # _standalone_root for the numbers.
+    found = Path(_run(["uv", "python", "find", "--system", "--managed-python", version]))
+    src = _standalone_root(found, version)  # .../cpython-3.12-linux-x86_64-gnu
 
     target = dest / "python"
     if target.exists():
