@@ -86,9 +86,16 @@ def test_the_emitted_unit_parses_with_no_directive_systemd_would_ignore(
     assert "Unknown key" not in _verify(tmp_path, good), _verify(tmp_path, good)
 
     bad = good.replace("EnvironmentFile=-", "EnviromentFile=-")
-    assert "Unknown key 'EnviromentFile'" in _verify(tmp_path, bad), (
-        "systemd-analyze did not report a directive it does not know: this probe "
-        "cannot detect the failure it exists to detect"
+    # Assert the BEHAVIOUR (it named the key it does not know), not systemd's
+    # phrasing, which differs across versions:
+    #   systemd 259: Unknown key 'EnviromentFile' in section [Service]
+    #   systemd 255: Unknown key name 'EnviromentFile' in section 'Service'
+    # Pinning the exact string made this control fire on CI while the code was
+    # fine -- measured 2026-08-08, run 31240882186.
+    out = _verify(tmp_path, bad)
+    assert "Unknown key" in out and "EnviromentFile" in out, (
+        f"systemd-analyze did not report a directive it does not know: this probe "
+        f"cannot detect the failure it exists to detect. Got: {out!r}"
     )
 
 
