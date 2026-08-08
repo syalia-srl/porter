@@ -43,6 +43,37 @@ def require_uv() -> None:
     _require_uv()
 
 
+def _require_systemd_analyze() -> None:
+    """Third of the same bargain, and the one that was missing.
+
+    `systemd-analyze verify` is the only check in this suite that can say a unit
+    directive is one systemd actually *knows*. A misspelled key is not an error
+    to systemd -- it logs "Unknown key ... ignoring" and starts the service
+    anyway, so `EnviromentFile` hands the service an environment with none of
+    its config in it, at rc=0. A slim CI image is precisely where the binary is
+    absent, so without an armed variable that check disappears exactly where it
+    is needed and pytest still exits 0.
+
+    Off by default, like the other two, so a contributor on a non-systemd host
+    gets a skip rather than a wall of failures.
+    """
+    if shutil.which("systemd-analyze"):
+        return
+    if os.environ.get("PORTER_REQUIRE_SYSTEMD", "") not in ("", "0"):
+        pytest.fail(
+            "systemd-analyze is not on PATH and PORTER_REQUIRE_SYSTEMD is set: "
+            "this run would have skipped the only check that every directive in "
+            "the emitted unit is one systemd recognises.",
+            pytrace=False,
+        )
+    pytest.skip("systemd-analyze not on PATH")
+
+
+@pytest.fixture
+def require_systemd_analyze() -> None:
+    _require_systemd_analyze()
+
+
 @pytest.fixture(scope="session")
 def vendored(tmp_path_factory) -> Path:
     """One vendored interpreter for the whole session -- it is ~97 MB and a

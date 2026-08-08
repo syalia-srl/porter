@@ -2,6 +2,7 @@ import shutil
 import subprocess
 
 import pytest
+from conftest import _require_systemd_analyze
 
 from porter.config import split, env_postinst
 from porter.systemd import unit
@@ -71,8 +72,8 @@ def _verify(tmp_path, body: str) -> str:
     return proc.stdout + proc.stderr
 
 
-@pytest.mark.skipif(not shutil.which("systemd-analyze"), reason="systemd-analyze not installed")
-def test_the_emitted_unit_parses_with_no_directive_systemd_would_ignore(tmp_path):
+def test_the_emitted_unit_parses_with_no_directive_systemd_would_ignore(
+        tmp_path, require_systemd_analyze):
     """A misspelled directive is not an error to systemd -- it logs "Unknown
     key ... ignoring" and starts the service anyway. So `EnviromentFile` would
     hand the service an environment with none of its config in it, at rc=0,
@@ -89,6 +90,95 @@ def test_the_emitted_unit_parses_with_no_directive_systemd_would_ignore(tmp_path
         "systemd-analyze did not report a directive it does not know: this probe "
         "cannot detect the failure it exists to detect"
     )
+
+
+def _outcome(fn) -> str:
+    """Run `fn` and NAME what it did, rather than letting pytest's own
+    control-flow exceptions become this test's outcome.
+
+    `with pytest.raises(pytest.fail.Exception)` is the obvious spelling and it
+    is a trap here. `Skipped` is not a subclass of `Failed`, so a skip is not
+    caught: it propagates, and pytest marks *this* test skipped -- green, and
+    silent, which is the precise failure the variable under test exists to
+    prevent, reproduced inside its own test. scripts/reverify-guards.sh caught
+    it 2026-08-08 by reporting the guard removed and the suite still green.
+    """
+    try:
+        fn()
+    except pytest.fail.Exception:
+        return "failed"
+    except pytest.skip.Exception:
+        return "skipped"
+    return "returned"
+
+
+def test_a_missing_systemd_analyze_cannot_skip_an_armed_run(monkeypatch):
+    """The variable is the guard, so the variable is what is tested.
+
+    `test_the_emitted_unit_parses...` was the sole constraint on seven of the
+    unit's directives and it skipped silently when the binary was absent -- on
+    a slim CI image the suite would have exited 0 with all seven unconstrained.
+    PORTER_REQUIRE_SYSTEMD turns that skip into a failure, and both branches are
+    asserted because a variable nothing reads is the same silence with more
+    ceremony.
+    """
+    monkeypatch.setattr(shutil, "which", lambda _name: None)
+
+    monkeypatch.delenv("PORTER_REQUIRE_SYSTEMD", raising=False)
+    assert _outcome(_require_systemd_analyze) == "skipped", (
+        "unarmed, a missing systemd-analyze should skip: a contributor without "
+        "it must not face a wall of failures")
+
+    monkeypatch.setenv("PORTER_REQUIRE_SYSTEMD", "1")
+    assert _outcome(_require_systemd_analyze) == "failed", (
+        "armed, a missing systemd-analyze must FAIL the run: skipping here is a "
+        "green suite with seven unit directives unconstrained")
+
+
+def _sections(body: str) -> dict[str, list[str]]:
+    """Unit file -> {section: [lines]}. Placement is half of each directive's
+    meaning: `WantedBy=` in `[Service]` is a key systemd does not know there,
+    and `ProtectSystem=` in `[Install]` is silently inert."""
+    out: dict[str, list[str]] = {}
+    current = None
+    for line in body.splitlines():
+        if line.startswith("[") and line.endswith("]"):
+            current = line[1:-1]
+            out[current] = []
+        elif line and current is not None:
+            out[current].append(line)
+    return out
+
+
+def test_unit_carries_the_hardening_and_restart_directives_in_the_right_sections():
+    """Presence, values and placement -- independent of `systemd-analyze`.
+
+    Worth having even though `systemd-analyze verify` runs on the same unit,
+    because the two checks are orthogonal rather than redundant. `verify`
+    reports keys it does not *recognise*; it says nothing about keys that are
+    *missing*, and a unit with all seven of these deleted verifies perfectly
+    clean. It also does not run at all on a host without the binary -- which,
+    until PORTER_REQUIRE_SYSTEMD, was every host where nobody noticed.
+
+    So: `verify` pins spelling and section-validity, this pins presence and
+    value. Dropping either one leaves a real hole. Exact-line membership rather
+    than substring, so a value change (`RestartSec=3` -> `30`) or a directive
+    demoted into a comment fails here.
+    """
+    body = unit("porter-example-service", "Example service", "/bin/true", "/tmp")
+    sections = _sections(body)
+    service = [
+        "StateDirectory=porter-example-service",
+        "ProtectSystem=strict",
+        "PrivateTmp=yes",
+        "NoNewPrivileges=yes",
+        "Restart=on-failure",
+        "RestartSec=3",
+    ]
+    missing = [d for d in service if d not in sections.get("Service", [])]
+    assert not missing, f"[Service] lost {missing}:\n{body}"
+    assert "WantedBy=multi-user.target" in sections.get("Install", []), (
+        f"the unit would install into no target and never start at boot:\n{body}")
 
 
 def test_unit_loads_defaults_then_env_so_admin_wins():
