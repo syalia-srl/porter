@@ -57,6 +57,23 @@ __all__ = ["BakeArtifact", "Component", "Manifest", "Metapackage", "Migration",
 COMPONENT_KEYS = frozenset({
     "name", "package", "version", "description", "maintainer", "architecture",
     "kind", "python", "requirements", "exec", "source", "data", "bake", "env",
+    "admin_keys", "bin_name", "after", "schedule", "migrations", "build",
+})
+# The keys ONLY the built-in assembler reads. A `build:` component's script
+# writes the whole stage -- interpreter, payload, unit, wrapper, config, the lot
+# -- so `assemble` reads not one of these, and reading none of them is exactly
+# how they would be dropped in silence. `kind: service` beside a `build:` is the
+# worst of them: the adopter waits for a unit porter never writes, and the
+# package installs at rc=0 with nothing to start.
+#
+# `bake` is deliberately NOT here. It runs before assembly, in `porter.bake`,
+# and it is orthogonal to who stages the tree -- a hook component with an ETL
+# still wants its artefacts checked for magnitude and for a stranded WAL.
+# `version`, `description`, `maintainer`, `architecture` and `name` are not here
+# either: they are control fields, and the hook receives every one of them in
+# its environment.
+ASSEMBLER_ONLY_KEYS = frozenset({
+    "kind", "exec", "python", "requirements", "source", "data", "env",
     "admin_keys", "bin_name", "after", "schedule", "migrations",
 })
 # The top level is the component keys (a flat manifest is one component written
@@ -80,6 +97,12 @@ EXEC_KEYS = frozenset({"module", "args"})
 # and a validator that half-covers a block is worse than one that does not
 # touch it, because it reads like the real thing.
 REQUIRED_COMPONENT_KEYS = ("package", "description", "kind", "exec")
+# A hook component needs neither. `kind` selects between the branches of
+# `assemble` and a hook takes all of them over; `exec` names the module porter
+# runs and porter runs nothing here. Requiring them anyway would mean every
+# escape-hatch manifest carrying two fields whose values nothing reads -- which
+# is the drift the hatch exists to avoid, written into the schema.
+REQUIRED_HOOK_COMPONENT_KEYS = ("package", "description", "build")
 REQUIRED_METAPACKAGE_KEYS = ("package", "description", "depends")
 
 
@@ -212,12 +235,50 @@ def _refuse_two_packages_with_one_name(where: str, names: list[str]) -> None:
         )
 
 
-def _component_pairs(where: str, entries: list[Mapping]) -> list[tuple[Component, Python]]:
-    """Validate each merged entry, then hand it to `types.Component`."""
+def _refuse_assembler_keys_beside_a_build_hook(where: str, written: Mapping) -> None:
+    """A key the hook makes porter stop reading is a key porter would drop.
+
+    The escape hatch's whole claim is that it bypasses *assembly* and nothing
+    else, so the fields assembly alone consumes have no reader once it is on.
+    `source:` beside a `build:` is the plain case -- the payload the adopter
+    listed is never copied and the script's tree ships instead -- and
+    `admin_keys:` is the expensive one: no `<pkg>-setup`, no `/etc/<pkg>/env`,
+    and an operator with a wizard the manifest promised and the package does
+    not carry. Every one of them builds, lints and installs at rc=0.
+
+    Read off the entry AS WRITTEN, never the merged one. `python:`, `version:`
+    and friends are shared top-level keys in a `components:` manifest, so a
+    project with one hook component beside three ordinary ones would otherwise
+    be refused for a key it never wrote next to the hook.
+    """
+    declared = sorted(set(written) & ASSEMBLER_ONLY_KEYS)
+    if declared:
+        raise ValueError(
+            f"{where}: declares build: and also "
+            f"{', '.join(repr(k) for k in declared)}. A build hook writes the whole "
+            "stage, so porter reads none of those -- they would be accepted here "
+            "and dropped, and the package would build, lint and install at rc=0 "
+            "without whatever they asked for. Delete them, or delete build: and "
+            "let porter assemble the component"
+        )
+
+
+def _component_pairs(where: str, entries: list[Mapping],
+                     written: list[Mapping]) -> list[tuple[Component, Python]]:
+    """Validate each merged entry, then hand it to `types.Component`.
+
+    `written` is the same list before the shared top-level keys were merged in,
+    and only the hook refusal uses it -- see
+    `_refuse_assembler_keys_beside_a_build_hook`.
+    """
     pairs = []
     for index, entry in enumerate(entries):
         label = f"{where}: component {entry.get('name', entry.get('package', index))!r}"
-        _refuse_missing_keys(label, entry, REQUIRED_COMPONENT_KEYS)
+        if entry.get("build"):
+            _refuse_missing_keys(label, entry, REQUIRED_HOOK_COMPONENT_KEYS)
+            _refuse_assembler_keys_beside_a_build_hook(label, written[index])
+        else:
+            _refuse_missing_keys(label, entry, REQUIRED_COMPONENT_KEYS)
         _refuse_unknown_keys(label, entry, COMPONENT_KEYS)
         _refuse_unknown_keys(f"{label} python:", entry.get("python", {}), PYTHON_KEYS)
         _refuse_unknown_keys(f"{label} exec:", entry.get("exec", {}), EXEC_KEYS)
@@ -271,7 +332,7 @@ def load(path: Path | str) -> Manifest:
     merged = [{**shared, **entry} for entry in entries] if "components" in doc \
         else [shared]
 
-    components = _component_pairs(str(path), merged)
+    components = _component_pairs(str(path), merged, entries)
     metapackages = _metapackages(str(path), doc.get("metapackages", []), shared)
 
     # Duplicates first, and the order is not arbitrary: a collision makes the

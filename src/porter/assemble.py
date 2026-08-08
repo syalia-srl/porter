@@ -32,6 +32,23 @@ while nothing inside it is importable (measured 2026-08-08).
 
 Refusals here follow deb.py's precedent: **refuse, never repair.** A stage
 porter quietly fixes is a stage whose next surprise ships.
+
+**And a component may decline all of it.** `build: <script>` is the escape
+hatch of docs/design-spec.md: the script is handed an empty stage and writes
+the whole tree, and everything above -- the interpreter, the layout, the unit,
+the wrapper, the config split, the import probes -- is skipped. What is *not*
+skipped is the rest of the pipeline: the FHS lint, the `sh -n` pass, the
+`Depends:` derivation, the conffile derivation, packaging, the gate and the
+repo all run on the script's output exactly as they run on porter's own. The
+hatch bypasses assembly, not the guarantees -- a custom build cannot ship
+anything the built-in assembler would be refused for.
+
+That is the point of it existing. porter serves four repos it was not designed
+around, so the first component whose shape the schema does not anticipate would
+otherwise fork the tool; the spec's phrase is that porter must not become "a
+second thing to fight". The cost of the hatch is that porter reads none of the
+manifest's assembly keys any more, which is why `spec.py` refuses them beside
+it rather than accepting and dropping them.
 """
 from __future__ import annotations
 
@@ -41,10 +58,15 @@ import re
 import shlex
 import shutil
 import subprocess
+import sys
 from collections.abc import Sequence
 from dataclasses import dataclass
 from pathlib import Path
 
+# `_bash` is private to bake and imported anyway, rather than copied: it is the
+# one place that says bash is REFUSED when absent and never substituted with sh,
+# and two copies of that decision is one copy that can be relaxed alone.
+from porter.bake import _bash
 from porter.config import env_postinst, setup_script, split
 from porter.depends import derive_depends
 from porter.interpreter import install, vendor
@@ -408,6 +430,239 @@ exec {argv}
 """
 
 
+def _open_an_empty_stage(stage: Path) -> None:
+    """The stage porter builds into is porter's alone, and it starts empty.
+
+    Refused rather than emptied, which is deb.py's argument about DEBIAN/ one
+    step earlier: a second `porter build` into a directory that still holds the
+    previous component's tree would ship both, at rc=0, and the extra files are
+    precisely the ones nobody re-reads. Clearing it silently would instead throw
+    away a caller's deliberate pre-staging with nothing to show for it.
+
+    Shared by both paths on purpose. A build hook is handed the same empty
+    directory the assembler would have got, so a hook that appends to whatever
+    it finds cannot inherit a neighbour's payload either.
+    """
+    if stage.exists() and any(stage.iterdir()):
+        raise ValueError(
+            f"stage root is not empty: {stage}. porter will not build on top of an "
+            "existing tree -- the leftovers would ship. Remove it or pick another"
+        )
+    stage.mkdir(parents=True, exist_ok=True)
+
+
+def _refuse_a_hook_beside_keys_it_makes_porter_stop_reading(
+        component: Component, python: Python) -> None:
+    """The same refusal as `spec._refuse_assembler_keys_beside_a_build_hook`,
+    one layer in.
+
+    Written twice deliberately, and the two are not redundant: `spec.py` sees
+    the manifest keys as the adopter typed them and can name `python:`, which
+    reaches here only as a defaulted `Python` this function cannot tell from an
+    omission; this one sees every caller, and most of porter's own suite builds
+    a `Component` in Python and never goes near a YAML file. A refusal that
+    lives only in the loader is a refusal a test can walk straight past, and
+    then the behaviour the test pins is not the behaviour the tool has.
+    """
+    declared = [name for name, present in (
+        ("kind", component.kind != "custom"),
+        ("exec", bool(component.module or component.args)),
+        ("source", bool(component.source_paths)),
+        ("data", bool(component.data_paths)),
+        ("requirements", bool(component.requirements)),
+        ("env", bool(component.defaults)),
+        ("admin_keys", bool(component.admin_keys)),
+        ("bin_name", bool(component.bin_name)),
+        ("after", bool(component.after)),
+        ("schedule", bool(component.schedule)),
+        ("migrations", bool(component.migrations)),
+        ("python.package", not python.bundled),
+    ) if present]
+    if declared:
+        raise ValueError(
+            f"component {component.name!r} declares build: {component.build!r} and "
+            f"also {', '.join(declared)}. The hook writes the whole stage, so "
+            "porter reads none of those -- they would be dropped and the package "
+            "would build, lint and install at rc=0 without them"
+        )
+
+
+def _hook_environment(component: Component, python: Python, src_root: Path,
+                      stage: Path, stamp: str | None) -> dict[str, str]:
+    """What the script is told, and it is told it through the environment.
+
+    Not argv: a hook is a script an adopter already had, or one they write in
+    ten lines, and `$PORTER_STAGE` reads better in both than `$1` -- which is
+    also positional, so inserting a variable later would silently renumber every
+    existing hook's arguments.
+
+    The control fields are all here because the hook cannot get at them any
+    other way and porter will stamp them onto the .deb regardless: a script that
+    writes `/usr/share/$PORTER_PACKAGE/` from `$PORTER_PACKAGE` cannot drift
+    from the `Package:` field, and one that hardcodes the name can. `$PORTER_STAMP`
+    is `bake`'s provenance block, and porter does *not* write it into the stage
+    itself -- `/usr/share/<pkg>/VERSION` is inside the hook's tree, and porter
+    writing there after the hook ran is the silent-overwrite failure that
+    `RESERVED_SHARE_NAMES` exists to refuse one path over.
+
+    Inherited and extended, not replaced: a hook needs PATH, HOME and whatever
+    toolchain the project's build depends on.
+    """
+    env = dict(os.environ)
+    env.update({
+        "PORTER_STAGE": str(stage),
+        "PORTER_SRC_ROOT": str(Path(src_root).resolve()),
+        "PORTER_NAME": component.name,
+        "PORTER_PACKAGE": component.package,
+        "PORTER_VERSION": component.version,
+        "PORTER_ARCHITECTURE": component.architecture,
+        "PORTER_MAINTAINER": component.maintainer,
+        "PORTER_DESCRIPTION": component.description,
+        "PORTER_PYTHON_VERSION": python.version,
+        "PORTER_STAMP": stamp or "",
+    })
+    return env
+
+
+def _run_the_build_hook(component: Component, python: Python, src_root: Path,
+                        stage: Path, stamp: str | None) -> None:
+    """Run the script, and let nothing about its failure be quiet.
+
+    `bash -e -o pipefail`, which is `porter.bake`'s contract and for the same
+    reason: without `pipefail`, `render | tee build.log` reports `tee`'s success
+    and a hook that produced nothing exits 0. Run from `src_root`, so a hook
+    written as `./build.sh` in a repo behaves the same whatever directory
+    `porter build` was invoked from.
+
+    **stderr is captured and stdout is not.** They are different things here: a
+    build hook's stdout is its log, minutes of it, and swallowing that to
+    re-print a tail on failure trades the useful half for the tidy half
+    (`bake._run_steps` made the same call). Its stderr is the diagnostic that
+    has to survive into porter's own error, because the traceback is the last
+    place anyone looks before deciding porter is broken. Captured stderr is
+    written back out on success, so a hook that warns is still heard.
+    """
+    script = Path(src_root) / component.build
+    # Before the hook runs rather than as bash's rc=127, so the message names
+    # the manifest key and the path porter resolved it to. `build: build.sh` is
+    # relative to the manifest's directory, which an adopter reading
+    # `No such file or directory` from a shell has no way to know.
+    if not script.is_file():
+        raise ValueError(
+            f"component {component.name!r} declares build: {component.build!r} and "
+            f"there is no such file at {script}. The path is relative to the "
+            "manifest's own directory"
+        )
+    proc = subprocess.run(
+        [_bash(), "-e", "-o", "pipefail", str(script)],
+        cwd=Path(src_root), stderr=subprocess.PIPE, text=True,
+        env=_hook_environment(component, python, src_root, stage, stamp))
+    if proc.returncode != 0:
+        raise RuntimeError(
+            f"build hook {component.build!r} failed with rc={proc.returncode} "
+            f"(run in {src_root}). Its stderr follows.\n{proc.stderr.rstrip()}"
+        )
+    if proc.stderr:
+        sys.stderr.write(proc.stderr)
+
+
+def _refuse_a_hook_that_produced_nothing(component: Component,
+                                         stage: Path) -> None:
+    """Magnitude, not existence -- the hatch's own version of the standing rule.
+
+    A hook's entire output is an rc, and an rc is the least reliable thing about
+    a build script: `mkdir -p "$PORTER_STAGE/usr/lib/$PORTER_PACKAGE"` and a
+    render step that silently wrote nothing exits 0, and porter would package
+    the directories into a .deb that installs perfectly and delivers no payload.
+    That is the shape this whole repo exists to refuse, arriving through the one
+    door where porter did not write the tree.
+
+    So both halves are checked, and the second is the one that matters: a stage
+    can hold twenty files and zero bytes. `touch` is what a half-written render
+    step leaves behind, and "the file is there" and "the file is real" are
+    different questions (AGENTS.md; a 30,912-byte package once passed every path
+    assertion in this suite).
+
+    Zero is the floor because zero is the only floor that is not a guess about
+    somebody else's payload. A hook that wants a real minimum declares `bake:`
+    artifacts with `min_bytes`, which runs before this and says what the numbers
+    mean.
+
+    Symlinks are not counted. A tree that is nothing but links to paths outside
+    itself has no payload of its own, and deb.py refuses the absolute ones a
+    moment later anyway.
+    """
+    files, total = [], 0
+    for dirpath, _dirnames, filenames in os.walk(stage):
+        for name in filenames:
+            p = Path(dirpath) / name
+            if p.is_symlink():
+                continue
+            files.append(p)
+            total += p.stat().st_size
+    if not files:
+        raise RuntimeError(
+            f"build hook {component.build!r} exited 0 and left no files in the "
+            f"stage ({stage}): porter would package an empty tree into a .deb "
+            "that installs cleanly and delivers nothing"
+        )
+    if total == 0:
+        raise RuntimeError(
+            f"build hook {component.build!r} exited 0 and left {len(files)} file(s) "
+            f"totalling 0 bytes in the stage ({stage}). Every one of them exists "
+            "and none of them has anything in it -- which is what a render step "
+            "that failed halfway leaves behind, and it passes every check that "
+            "asks whether a path is there"
+        )
+
+
+def _assemble_by_hook(component: Component, python: Python, src_root: Path,
+                      stage: Path, stamp: str | None) -> Staged:
+    """The escape hatch: the script stages the tree, porter keeps the rest.
+
+    What porter still does after the hook returns is the whole argument for the
+    hatch being safe, and none of it is optional:
+
+      - the stage must actually hold a payload (above);
+      - `conffiles` are derived from the tree, so deb.py's lint and this list
+        are two readings of the same directory and cannot disagree;
+      - `Depends:` is derived from the ELF headers of whatever was staged --
+        rule 11 holds for a hook exactly as it holds for the assembler, and a
+        hook is *likelier* to stage a native binary porter never compiled;
+      - and `build_deb` then applies the FHS lint and the `sh -n` pass to the
+        result, unchanged. A hook cannot ship `/home/...`, `/etc/<pkg>/env`, an
+        absolute symlink, a pre-staged `DEBIAN/` or a `/usr/bin` script that
+        does not parse, because none of those refusals ever looked at who wrote
+        the tree.
+
+    `scripts` is empty and that is a real boundary rather than an oversight: a
+    hook has no way to contribute a postinst, because `DEBIAN/` is porter's and
+    deb.py refuses a stage carrying one. A hook component that needs maintainer
+    scripts is the next example the gallery owes, not a key to invent here.
+    """
+    _refuse_a_hook_beside_keys_it_makes_porter_stop_reading(component, python)
+    _open_an_empty_stage(stage)
+    _run_the_build_hook(component, python, src_root, stage, stamp)
+    _refuse_a_hook_that_produced_nothing(component, stage)
+
+    control = {
+        "Package": component.package,
+        "Version": component.version,
+        "Architecture": component.architecture,
+        "Maintainer": component.maintainer,
+        "Description": component.description,
+    }
+    depends = derive_depends(stage)
+    if depends:
+        control["Depends"] = ", ".join(depends)
+    # Derived from the tree the hook wrote, exactly as it is for a tree porter
+    # wrote: deb.py's lint refuses any /etc path it was not handed, so this list
+    # and that lint are two readings of one directory and cannot disagree. A
+    # hook has no key to declare conffiles with and needs none.
+    conffiles = _conffiles(stage)
+    return Staged(stage=stage, conffiles=conffiles, control=control, scripts={})
+
+
 def assemble(component: Component, python: Python,
              src_root: Path, stage_root: Path, stamp: str | None = None,
              siblings: Sequence[Component] = ()) -> Staged:
@@ -437,24 +692,19 @@ def assemble(component: Component, python: Python,
     src_root, stage = Path(src_root), Path(stage_root).resolve()
     pkg = component.package
 
+    # The escape hatch, taken before anything below is consulted. Everything
+    # from here to the end of this function is what `build:` declines; the
+    # pipeline either side of it is what it keeps. See `_assemble_by_hook`.
+    if component.build:
+        return _assemble_by_hook(component, python, src_root, stage, stamp)
+
     _refuse_what_porter_cannot_emit(component, python)
     _refuse_a_source_directory_below_the_import_root(src_root, component.source_paths)
     # Before 97 MB is vendored: a cycle or a misspelled `after:` is a property
     # of the manifest and needs nothing staged to detect.
     depends_on = resolve_ordering(list(siblings) or [component])[component.name]
 
-    # Refused rather than emptied, which is deb.py's argument about DEBIAN/ one
-    # step earlier: a second `porter build` into a directory that still holds
-    # the previous component's tree would ship both, at rc=0, and the extra
-    # files are precisely the ones nobody re-reads. Clearing it silently would
-    # instead throw away a caller's deliberate pre-staging (a `build:` hook's
-    # output, docs/design-spec.md's escape hatch) with nothing to show for it.
-    if stage.exists() and any(stage.iterdir()):
-        raise ValueError(
-            f"stage root is not empty: {stage}. porter will not build on top of an "
-            "existing tree -- the leftovers would ship. Remove it or pick another"
-        )
-    stage.mkdir(parents=True, exist_ok=True)
+    _open_an_empty_stage(stage)
 
     libdir = stage / "usr/lib" / pkg
     libdir.mkdir(parents=True)

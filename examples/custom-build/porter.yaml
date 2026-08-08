@@ -1,0 +1,55 @@
+# porter's example gallery: the escape hatch.
+#
+# Every other entry in this gallery describes its package and lets porter build
+# it. This one does not: `build:` names a script, the script writes the whole
+# staged tree, and porter's assembler never runs.
+#
+# The shape is one porter's schema cannot express at all -- a package with **no
+# Python in it**. There is no interpreter to vendor, no module to import, no
+# unit and no system user; the payload is a POSIX shell tool, its config file
+# and a couple of generated text assets. That is the point of the example.
+# porter serves four repos it was not designed around, and the first component
+# whose shape the schema does not anticipate would otherwise fork the tool --
+# docs/design-spec.md's phrase is that porter must not become "a second thing
+# to fight".
+#
+# What porter still does, and it is the whole reason this is a hatch rather
+# than a hole (see `assemble._assemble_by_hook`):
+#
+#   - refuses a stage the hook left empty, by magnitude and not by existence:
+#     a script that exits 0 having written nothing, or twenty files of zero
+#     bytes, does not become a package;
+#   - lints the result exactly as it lints its own. This tree could not ship
+#     /home/..., /etc/<pkg>/env, an absolute symlink, a pre-staged DEBIAN/ or
+#     a /usr/bin script that `sh -n` rejects -- and build.sh below writes a
+#     /usr/bin script, so that last one is live for this entry;
+#   - derives `conffiles` from the tree, so /etc/porter-example-custom/
+#     report.conf is registered with dpkg and survives an upgrade the admin
+#     has edited;
+#   - derives `Depends:` from the ELF headers of whatever was staged (rule 11),
+#     which matters more here than anywhere else: a hook is the likeliest place
+#     for a native binary porter never compiled to appear;
+#   - packages, gates and publishes it like any other .deb.
+#
+# The manifest is short because it has to be. Every key the built-in assembler
+# alone reads -- kind, exec, source, data, requirements, python, env,
+# admin_keys, bin_name, after, schedule, migrations -- is REFUSED beside
+# `build:`, because porter would read none of them and porter's characteristic
+# bug is the silently dropped input. What is left is the control fields, and
+# the hook receives all of them in its environment.
+
+package: porter-example-custom
+version: "1.0"
+description: porter's example of the build hook, a package with no Python in it
+maintainer: porter <porter@example.com>
+
+# `all` and not `amd64`, honestly: the payload is shell and text, so there is
+# nothing machine-dependent in it. Pinning it to amd64 would make the one
+# package here with no native code the one an arm64 client cannot install.
+architecture: all
+
+# Relative to this file's directory, which is what `porter build` passes as
+# PORTER_SRC_ROOT and runs the hook from. Run under `bash -e -o pipefail`, so a
+# failing command in a pipeline fails the build instead of reporting `tee`'s
+# success.
+build: build.sh

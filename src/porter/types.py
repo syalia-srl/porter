@@ -107,6 +107,12 @@ class Component:
     # Declared last because a component acquires them last: a migration exists
     # only once there is a previous version to migrate *from*. See porter.migrate.
     migrations: list[Migration] = field(default_factory=list)
+    # The escape hatch (docs/design-spec.md): a script, relative to `src_root`,
+    # that takes over the ASSEMBLE stage entirely. When it is set, `assemble`
+    # runs it instead of staging anything itself and every field above is unread
+    # -- which is why `spec.py` refuses them beside it rather than letting them
+    # be dropped in silence. See `assemble._run_the_build_hook`.
+    build: str | None = None
 
     @classmethod
     def from_manifest(cls, manifest: dict) -> tuple[Component, Python]:
@@ -129,9 +135,18 @@ class Component:
                 name=manifest.get("name", manifest["package"]),
                 package=manifest["package"],
                 description=manifest["description"],
-                kind=manifest["kind"],
-                module=manifest["exec"]["module"],
-                args=list(manifest["exec"].get("args", [])),
+                # `.get` and not `[...]` for these two, because a `build:`
+                # component declares neither: its script writes the whole stage,
+                # so there is no kind for porter to branch on and no module for
+                # porter to run. `spec.py` requires both of an ordinary
+                # component and refuses both beside a hook, so the defaults here
+                # are reachable only through the hatch -- and `custom` is not a
+                # member of `assemble.SUPPORTED_KINDS`, so a component that
+                # reaches the ordinary path carrying it is refused by name
+                # rather than staged as something porter guessed.
+                kind=manifest.get("kind", "custom"),
+                module=manifest.get("exec", {}).get("module", ""),
+                args=list(manifest.get("exec", {}).get("args", [])),
                 source_paths=list(manifest.get("source", [])),
                 data_paths=list(manifest.get("data", [])),
                 requirements=list(manifest.get("requirements", [])),
@@ -156,6 +171,7 @@ class Component:
                               script=m["script"])
                     for m in manifest.get("migrations", [])
                 ],
+                build=manifest.get("build"),
             ),
             Python(version=str(py.get("version", "3.12")),
                    package=py.get("package", "bundled")),
