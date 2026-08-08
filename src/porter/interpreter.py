@@ -25,24 +25,42 @@ def _standalone_root(found: Path, version: str) -> Path:
     """Derive the python-build-standalone root from an interpreter path, and
     refuse anything that is not one.
 
-    `uv python find` answers with the interpreter uv would *use*, and that
-    includes a virtualenv -- the active `$VIRTUAL_ENV`, or one merely
-    discovered in the cwd -- whenever its version satisfies the request.
-    Measured on zion 2026-08-07 with uv 0.11.29: from a directory holding a
-    3.12 `.venv`, `uv python find 3.12` returned `.venv/bin/python3`. Two
-    directories up from that is the venv itself, so vendoring it would copy a
-    tree whose `bin/python3.12` is an absolute symlink into the build host --
-    precisely the failure rule 1 exists to prevent -- and it would do so
-    silently, shipping a wrong package rather than raising.
+    `uv python find` answers with the interpreter uv would *use*, and that is
+    not necessarily a tree we may vendor. Two ways it goes wrong, both measured
+    on zion 2026-08-07 with uv 0.11.29:
 
-    `--system --managed-python` on the find call is the primary defence. This
-    check is the one that still holds if a future uv changes that behaviour,
-    or if someone rewrites the call and drops the flags.
+    - a **virtualenv** -- the active `$VIRTUAL_ENV`, or one merely discovered in
+      the cwd -- whenever its version satisfies the request. From a directory
+      holding a 3.12 `.venv`, `uv python find 3.12` returned `.venv/bin/python3`;
+      two directories up is the venv itself, whose `bin/python3.12` is an
+      absolute symlink into the build host. That is the failure rule 1 exists
+      to prevent, produced silently rather than raised.
+    - a **system or distro interpreter**: `uv python find --system 3.14`
+      returned `/usr/bin/python3.14`, two directories up from which is `/usr`.
+      Copying `/usr` "succeeds": the post-copy `binary.exists()` check passes
+      because `/usr/bin/python3.14` came along. The artefact is multi-gigabyte
+      and not relocatable.
 
-    The obvious probes are not sufficient on their own: a venv *has*
-    `bin/python<version>` and `lib/python<version>/`. What it has that a
-    standalone tree does not is `pyvenv.cfg`; what it lacks is the stdlib --
-    its `lib/python<version>/` holds only `site-packages`.
+    So this refuses on three independent grounds, and the third is what makes
+    the guard hold even if the `--system --managed-python` flags are dropped
+    from the find call:
+
+    1. `pyvenv.cfg` present -> a virtualenv, by name.
+    2. The standalone layout absent. The obvious probes are not sufficient on
+       their own -- a venv *has* `bin/python<version>` and
+       `lib/python<version>/`. What it lacks is the stdlib: its
+       `lib/python<version>/` holds only `site-packages`, so `os.py` is the
+       discriminator.
+    3. The root is not under `uv python dir`. Layout alone cannot separate a
+       vendorable tree from `/usr`, which has no `pyvenv.cfg`, has
+       `bin/python<version>`, and has `lib/python<version>/os.py` -- verified
+       on zion, where the four layout probes all pass for `/usr`. Provenance
+       can: only trees uv installed itself live under its managed-python
+       directory, which rejects `/usr`, `/usr/local`, conda and Homebrew roots
+       with one predicate.
+
+    Ordering is deliberate: the two cheap layout refusals name the specific
+    shape they caught before the provenance check shells out.
     """
     root = found.parent.parent
     if (root / "pyvenv.cfg").exists():
@@ -58,6 +76,20 @@ def _standalone_root(found: Path, version: str) -> Path:
                 f"refusing to vendor {root}: not a python-build-standalone tree "
                 f"({probe} is missing). `uv python find {version}` resolved to {found}."
             )
+    answer = _run(["uv", "python", "dir"])
+    if not answer:
+        # Path("") is Path("."), which would silently turn this into "is the
+        # root under the cwd" -- a check that passes for the wrong reason.
+        raise RuntimeError("`uv python dir` answered nothing; cannot verify provenance")
+    managed = Path(answer)
+    if not root.resolve().is_relative_to(managed.resolve()):
+        raise RuntimeError(
+            f"refusing to vendor {root}: it is not under uv's managed python "
+            f"directory ({managed}), so uv did not install it. A system, distro, "
+            f"conda or Homebrew interpreter is not a relocatable "
+            f"python-build-standalone tree. `uv python find {version}` resolved "
+            f"to {found}."
+        )
     return root
 
 
@@ -111,7 +143,25 @@ def vendor(dest: Path, version: str = DEFAULT_VERSION) -> Path:
 
 
 def install(python_bin: Path, requirements: list[str], constraints: Path | None = None) -> None:
-    """Install packages into the vendored interpreter's own site-packages."""
+    """Install packages into the vendored interpreter's own site-packages.
+
+    `--break-system-packages` is NOT redundant, but it is a no-op on the tree
+    `vendor()` hands over, because `vendor()` deleted EXTERNALLY-MANAGED two
+    steps earlier. Measured on zion 2026-08-07, uv 0.11.29, against a vendored
+    3.12 tree:
+
+        marker present, no flag    -> rc=2, "The interpreter at ... is
+                                      externally managed"
+        marker present, with flag  -> rc=0, idna installed
+        marker absent,  no flag    -> rc=0, idna installed
+
+    So the flag is what decouples `install()` from `vendor()`'s deletion: it
+    keeps working against any marked tree -- a uv-managed interpreter that was
+    not run through `vendor()`, or a future `vendor()` that stops deleting.
+    `test_install_succeeds_when_the_externally_managed_marker_is_present` is
+    the check that bites on it; the plain install test cannot, because on its
+    tree the marker is already gone.
+    """
     cmd = ["uv", "pip", "install", "--python", str(python_bin), "--break-system-packages"]
     if constraints:
         cmd += ["--constraint", str(constraints)]
