@@ -157,14 +157,22 @@ class Desktop:
 def launcher(pkg: str, url: str, health: str, name: str) -> str:
     """`/usr/bin/<pkg>-desktop`: wait for the service, then open a bare window.
 
-    Written as explicit `if` blocks and not as `command -v X && BROWSER=X &&
-    break`. Under `set -e` that AND-list is the last command of the loop body,
-    so a client without the first candidate exits the launcher at rc=1 with no
-    window and no message -- which is every client that has not installed
-    Google Chrome. The `if` form is exempt from `set -e` by construction, and
+    Written as explicit `if` blocks, because the probe is *allowed* to fail and
+    `set -e` must not act on it: a bare `command -v "$candidate"` in the loop
+    body exits the launcher at rc=1 the moment the first candidate is absent --
+    every client that has not installed Google Chrome, with no window and no
+    message. An `if` condition is exempt from `set -e` by construction.
+
+    The AND-list form `command -v X && BROWSER=X && break` is exempt too, and
+    this docstring claimed the opposite until 2026-08-08. Both POSIX and bash
+    exempt a command that fails in a non-final position of an `&&` list, and the
+    enclosing `for` does not re-raise it; measured on bash 5.3, the AND-list
+    loop survives a missing candidate at rc=0. The two forms are equivalent
+    here. The `if` is preferred for legibility, not for safety.
+
     `tests/test_desktop.py` runs the script against fake browsers rather than
-    grepping it, because the broken form contains every substring the working
-    one does.
+    grepping it, because a broken form contains every substring the working one
+    does.
 
     No `seq`, no `[[ ]]`: the loop is a POSIX counter so the only external
     commands are `mkdir`, `curl` and `sleep`, and `LAUNCHER_TOOLS` can name what

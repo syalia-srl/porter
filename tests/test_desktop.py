@@ -126,9 +126,15 @@ def harness(tmp_path):
 def test_launcher_survives_its_first_candidate_being_absent(harness):
     """The bug the sketch shipped, reproduced as a test.
 
-    `command -v google-chrome >/dev/null && BROWSER=... && break` is an AND-list
-    whose failure is the last command in the loop body, so `set -e` exits the
-    script -- rc=1, no window, no message. Every client without Google Chrome.
+    The probe is allowed to fail, and `set -e` must not act on it. Written as a
+    bare `command -v google-chrome >/dev/null` in the loop body, the launcher
+    exits at rc=1 the moment the first candidate is absent -- no window, no
+    message, every client without Google Chrome. The `if` condition is what
+    exempts it.
+
+    Not the AND-list form `command -v X && BROWSER=X && break`, which this
+    docstring named until 2026-08-08: bash exempts a non-final failure in an
+    `&&` list, so that form survives too. See `launcher()`'s docstring.
     """
     log = harness(_body(), browsers=("chromium",))
     assert "chromium --app=" in log, log
