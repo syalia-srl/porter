@@ -43,7 +43,7 @@ evidence; this is the short form.
    uv. In a shell that means `cp -aL`, never `cp -a`. Note that Python's
    `shutil.copytree` follows a symlinked *source root* regardless of its
    `symlinks=` argument, so the hazard is specific to `cp` and friends —
-   verified 2026-08-08. Do not restate the two as equivalent.
+   verified 2026-08-07. Do not restate the two as equivalent.
 3. **`python -m <module>`, never `bin/` console scripts** — their shebangs are
    absolute build paths.
 4. **Config is two files.** `/etc/<pkg>/defaults` (conffile, package-owned) and
