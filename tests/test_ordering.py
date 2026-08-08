@@ -21,12 +21,12 @@ Two failure classes this file is written against, both of them silent:
 from __future__ import annotations
 
 import os
-import shutil
 import subprocess
 from pathlib import Path
 
 import pytest
 import yaml
+import nspawn_support as nspawn
 from conftest import _require_uv
 
 from porter.assemble import assemble
@@ -450,85 +450,11 @@ journalctl --no-pager -u porter-dep -u porter-dependent > /out/journal 2>&1
 systemctl poweroff
 '''
 
-NSPAWN_DOCKERFILE = """FROM debian:bookworm-slim
-RUN apt-get update \\
- && apt-get install -y --no-install-recommends systemd systemd-sysv dbus \\
- && rm -rf /var/lib/apt/lists/*
-"""
-
-
-def _require_nspawn() -> None:
-    """Same bargain as PORTER_REQUIRE_UV/DOCKER/SYSTEMD, for the one test that
-    runs systemd rather than reading its files.
-
-    Deliberately **not** in .github/workflows/ci.yml's env block, unlike the
-    other three, and that is a hole stated rather than hidden: whether a
-    GitHub-hosted runner can boot systemd-nspawn has not been measured here, and
-    arming a variable on a gate that cannot satisfy it turns every CI run red
-    for a reason unrelated to the change under test. Armed locally, it is what
-    makes a green run evidence.
-    """
-    missing = None
-    if not shutil.which("systemd-nspawn"):
-        missing = "systemd-nspawn is not on PATH"
-    elif os.geteuid() != 0 and subprocess.run(
-            ["sudo", "-n", "true"], capture_output=True).returncode != 0:
-        missing = "not root and `sudo -n` does not work"
-    elif not (shutil.which("docker") and subprocess.run(
-            ["docker", "info"], capture_output=True).returncode == 0):
-        missing = "no usable docker daemon to build the container root from"
-    if missing is None:
-        return
-    if os.environ.get("PORTER_REQUIRE_NSPAWN", "") not in ("", "0"):
-        pytest.fail(f"PORTER_REQUIRE_NSPAWN is set and {missing}: this run would "
-                    "have skipped the only test that runs systemd.", pytrace=False)
-    pytest.skip(missing)
-
-
-def _sudo(*args: str, **kw) -> subprocess.CompletedProcess:
-    prefix = [] if os.geteuid() == 0 else ["sudo", "-n"]
-    return subprocess.run([*prefix, *args], **kw)
-
-
 @pytest.fixture(scope="module")
 def nspawn_root(tmp_path_factory) -> Path:
-    """A bootable Debian tree, built by exporting a docker image.
-
-    debootstrap is not installed here and docker already is (the suite's
-    container tests need it), and `docker export` of an image that has systemd
-    in it is the same filesystem debootstrap would have produced. The image is
-    a build-time convenience only -- nothing in the test runs under docker, and
-    the thing under test is systemd's own behaviour inside nspawn.
-    """
-    _require_nspawn()
-    build = subprocess.run(["docker", "build", "-q", "-t",
-                            "porter-test-nspawn:bookworm", "-"],
-                           input=NSPAWN_DOCKERFILE, capture_output=True, text=True)
-    assert build.returncode == 0, build.stderr
-    created = subprocess.run(["docker", "create", "porter-test-nspawn:bookworm"],
-                             capture_output=True, text=True)
-    assert created.returncode == 0, created.stderr
-    cid = created.stdout.strip()
-    root = tmp_path_factory.mktemp("nspawn") / "root"
-    root.mkdir()
-    try:
-        export = subprocess.Popen(["docker", "export", cid], stdout=subprocess.PIPE)
-        extract = _sudo("tar", "-x", "-C", str(root), stdin=export.stdout)
-        export.stdout.close()
-        assert export.wait() == 0 and extract.returncode == 0
-    finally:
-        subprocess.run(["docker", "rm", "-f", cid], capture_output=True)
-    # The positive control on the root itself: without an init, nspawn --boot
-    # exits immediately and every assertion below would be about a container
-    # that never ran.
-    assert (root / "sbin/init").exists() or (root / "usr/sbin/init").exists(), (
-        f"{root} has no init: systemd-nspawn --boot has nothing to start")
-    # Removed with sudo, because it was extracted with sudo: 443 MB of
-    # root-owned tree per run that pytest's own tmp_path cleanup cannot delete,
-    # accumulating three deep in /tmp/pytest-of-apiad. Measured here on the
-    # first run of this fixture.
+    root = nspawn.build_root(tmp_path_factory.mktemp("nspawn"))
     yield root
-    _sudo("rm", "-rf", str(root))
+    nspawn.sudo("rm", "-rf", str(root))
 
 
 @pytest.fixture(scope="module")
@@ -578,37 +504,8 @@ def test_the_dependent_converges_though_its_dependency_fails_its_first_starts(
     happened.
     """
     out = tmp_path / "out"
-    out.mkdir()
-    _sudo("chmod", "0777", str(out))
-    root = nspawn_root
-    _sudo("cp", "/dev/stdin", str(root / "probe.sh"), input=PROBE_SH, text=True)
-    _sudo("chmod", "0755", str(root / "probe.sh"))
-    _sudo("cp", "/dev/stdin", str(root / "etc/systemd/system/porter-probe.service"),
-          input="[Unit]\nDescription=porter probe\nAfter=multi-user.target\n\n"
-                "[Service]\nType=oneshot\nExecStart=/probe.sh\n\n"
-                "[Install]\nWantedBy=multi-user.target\n", text=True)
-    enable = _sudo("systemctl", f"--root={root}", "enable", "porter-probe.service",
-                   capture_output=True, text=True)
-    assert enable.returncode == 0, enable.stderr
-
-    # --private-network, or the container's services bind the HOST's loopback:
-    # the ports would collide with anything already listening and two concurrent
-    # runs would fail each other. There is nothing to fetch -- the packages are
-    # bind-mounted and porter's whole premise is that a client needs no network.
-    boot = _sudo("systemd-nspawn", "-q", f"--directory={root}",
-                 f"--bind-ro={convergence_debs}:/debs", f"--bind={out}:/out",
-                 "--private-network", "--boot",
-                 capture_output=True, text=True, timeout=300)
-
-    # Written by root inside the container; handed back so pytest can clean up
-    # after itself. Done before the assertions, which is the point -- a failing
-    # assertion must not be what decides whether /tmp fills up.
-    _sudo("chown", "-R", f"{os.getuid()}:{os.getgid()}", str(out))
-
-    timeline = (out / "timeline").read_text() if (out / "timeline").exists() else ""
-    context = (f"nspawn rc={boot.returncode}\n{boot.stdout[-2000:]}\n"
-               f"{boot.stderr[-2000:]}\ntimeline:\n{timeline}\n"
-               f"probe log:\n{(out / 'probe.log').read_text()[-3000:] if (out / 'probe.log').exists() else '(none)'}")
+    booted = nspawn.boot_with_probe(nspawn_root, PROBE_SH, out, convergence_debs)
+    context = nspawn.context(booted, out)
 
     assert (out / "dpkg-rc").read_text().strip() == "DPKG_RC=0", context
 

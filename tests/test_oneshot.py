@@ -24,6 +24,7 @@ from pathlib import Path
 
 import pytest
 import yaml
+import nspawn_support as nspawn
 from conftest import _require_uv
 
 from porter.assemble import assemble
@@ -315,6 +316,90 @@ def test_the_same_procedure_enables_a_service_at_boot(tmp_path, require_uv,
         f"{sorted(p.relative_to(tree) for p in wants.rglob('*')) if wants.exists() else '(no etc/systemd/system at all)'}")
     assert not (wants / "timers.target.wants").exists(), (
         "a service acquired a timer link")
+
+
+# --- the job, actually run by systemd ----------------------------------------
+
+# Installs the job and asks systemd two things it cannot be asked offline: is
+# the timer armed (does systemd have a next elapse for it?), and does the job
+# run under the unit porter emitted. `systemctl start <pkg>.service` on a
+# Type=oneshot BLOCKS until the process exits, so its rc is the job's own -- on
+# Type=simple it would return the moment the fork succeeded and tell us nothing.
+JOB_PROBE_SH = '''\
+#!/bin/sh
+exec >/out/probe.log 2>&1
+set -x
+dpkg -i /debs/*.deb; echo "DPKG_RC=$?" > /out/dpkg-rc
+systemctl is-enabled demo-job.timer > /out/timer-enabled 2>&1
+systemctl is-enabled demo-job.service > /out/service-enabled 2>&1
+systemctl start demo-job.timer
+# The next time systemd intends to fire the job. Empty means the calendar was
+# never understood -- which is exactly what a shipped typo looks like.
+systemctl show -p NextElapseUSecRealtime --value demo-job.timer > /out/next-elapse
+systemctl start demo-job.service; echo "RUN_RC=$?" > /out/run-rc
+systemctl show -p Result --value demo-job.service > /out/result
+cat /var/lib/demo-job/report.txt > /out/report 2>&1
+ls -ld /var/lib/demo-job > /out/state-dir
+journalctl --no-pager -u demo-job > /out/journal 2>&1
+systemctl poweroff
+'''
+
+
+@pytest.fixture(scope="module")
+def nspawn_root(tmp_path_factory) -> Path:
+    root = nspawn.build_root(tmp_path_factory.mktemp("nspawn"))
+    yield root
+    nspawn.sudo("rm", "-rf", str(root))
+
+
+@pytest.mark.nspawn
+def test_the_job_runs_under_systemd_and_writes_to_its_state_directory(
+        nspawn_root, built_job, tmp_path):
+    """The end of the path, and the part no file can establish.
+
+    Everything else in this file proves the package *contains* the right units
+    and that enabling it links the right symlinks. None of that runs the job.
+    Here systemd installs the package, arms the timer, executes the service, and
+    the payload writes into the `StateDirectory=` systemd created for it -- the
+    four things that have to work together for `kind: oneshot` to mean anything,
+    and the last two of which involve `ProtectSystem=strict` and a static system
+    user that only a real boot exercises.
+    """
+    out = tmp_path / "out"
+    booted = nspawn.boot_with_probe(nspawn_root, JOB_PROBE_SH, out,
+                                    built_job.parent)
+    context = nspawn.context(booted, out)
+
+    # Existence before content: a probe that never ran leaves no files at all,
+    # and a FileNotFoundError three frames deep hides the container's console.
+    assert (out / "dpkg-rc").exists(), context
+    assert (out / "dpkg-rc").read_text().strip() == "DPKG_RC=0", context
+    # The timer is enabled and the service is not -- the same claim
+    # `test_installing_the_job_enables_its_timer...` makes offline, confirmed
+    # here by the systemd that actually did the enabling during postinst.
+    assert (out / "timer-enabled").read_text().strip() == "enabled", context
+    assert (out / "service-enabled").read_text().strip() == "indirect", context
+    # A next elapse means systemd parsed `OnCalendar=*-*-* 03:00:00` and intends
+    # to act on it. A timer with an expression it could not read is still
+    # "enabled" and has none.
+    assert (out / "next-elapse").read_text().strip() not in ("", "0", "n/a"), (
+        f"the timer is enabled but systemd has no next elapse for it: the "
+        f"calendar expression did not survive into a schedule\n{context}")
+
+    # The job ran to completion. `Result=success` is systemd's own verdict on a
+    # Type=oneshot, which it can only have because it waited for the process.
+    assert (out / "run-rc").read_text().strip() == "RUN_RC=0", context
+    assert (out / "result").read_text().strip() == "success", context
+    # And it wrote where it was supposed to: /var/lib/demo-job, created by
+    # StateDirectory=, under ProtectSystem=strict where nothing else is
+    # writable. The payload reads $STATE_DIRECTORY to find it.
+    report = (out / "report").read_text()
+    assert "ran, keeping 14 days" in report, (
+        f"the job did not write its report, or wrote it somewhere else\n{context}")
+    # RETENTION_DAYS=14 came out of /etc/demo-job/defaults through the unit's
+    # EnvironmentFile, so this line also proves the config split reaches the
+    # running process and not merely the disk.
+    assert "demo-job" in (out / "state-dir").read_text(), context
 
 
 def test_the_oneshot_examples_config_split_is_intact(built_job, tmp_path):
