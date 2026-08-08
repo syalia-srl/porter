@@ -101,6 +101,19 @@ it passes that text in as data (`readme=`, a component `description`); porter
 never bakes a language into its own output. A tool whose audience is
 Spanish-speaking is still an English tool.
 
+## Running the tests
+
+```bash
+PORTER_REQUIRE_UV=1 uv run --extra dev pytest
+```
+
+**Always set `PORTER_REQUIRE_UV=1`.** Most of the suite needs `uv` on PATH to
+vendor an interpreter; without that variable those tests *skip* and pytest still
+exits 0 — a green run that tested almost nothing. The variable turns the skip
+into an error. It is off by default so a contributor without uv gets skips rather
+than a wall of failures; it must be on anywhere a green result is trusted, and it
+is the first thing to wire into CI when CI exists.
+
 ## Documents
 
 | Path | What it is |
