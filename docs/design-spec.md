@@ -106,8 +106,14 @@ different path than it was built at, `--network none`, with no system
 
 Four build rules, each of which passes on a dev box and fails at a client:
 
-1. **`cp -aL`** — uv's managed-python directory is a *symlink*; `cp -a` copies the
-   link and vendors nothing.
+1. **Dereference the interpreter's root directory.** uv's managed-python
+   directory is a *symlink*; a copy that preserves it vendors nothing — and the
+   result still works on any host that has uv, so it fails only at the client.
+   In a shell: `cp -aL`, never `cp -a`. **This does not transfer to Python:**
+   `shutil.copytree` follows a symlinked source root whether `symlinks=` is True
+   or False (verified 2026-08-08), so the root hazard simply does not arise
+   there. An implementation note claiming the two are equivalent was wrong and
+   is corrected here.
 2. **Delete `lib/python3.12/EXTERNALLY-MANAGED`** — uv's marker, added to protect
    its own cache. Removing it is the legitimate redistributor action.
 3. **`--break-system-packages`** on the install.

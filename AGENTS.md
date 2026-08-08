@@ -36,8 +36,14 @@ evidence; this is the short form.
 1. **No venv, ever.** `uv venv --relocatable` writes an absolute symlink to the
    build host's interpreter and dies at the client. Vendor a
    python-build-standalone tree and install into its own `site-packages`.
-2. **`cp -aL`, not `cp -a`**, when materialising that interpreter — uv's managed
-   directory is a symlink, and `cp -a` vendors nothing.
+2. **Dereference the interpreter's root directory** when materialising it —
+   `uv python find` resolves through a symlinked directory
+   (`cpython-3.12-linux-x86_64-gnu` -> `cpython-3.12.13-...`), and a copy that
+   preserves that link vendors nothing while still working on any host that has
+   uv. In a shell that means `cp -aL`, never `cp -a`. Note that Python's
+   `shutil.copytree` follows a symlinked *source root* regardless of its
+   `symlinks=` argument, so the hazard is specific to `cp` and friends —
+   verified 2026-08-08. Do not restate the two as equivalent.
 3. **`python -m <module>`, never `bin/` console scripts** — their shebangs are
    absolute build paths.
 4. **Config is two files.** `/etc/<pkg>/defaults` (conffile, package-owned) and

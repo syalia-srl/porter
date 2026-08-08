@@ -18,7 +18,7 @@ Copied verbatim from `docs/design-spec.md`. Every task's requirements implicitly
 
 - **Build floor: Ubuntu 22.04** (glibc 2.35). Verified to run on 2.35 / 2.36 / 2.39 / 2.41.
 - **No venv, ever.** Vendor python-build-standalone; install into its own `site-packages`.
-- **`cp -aL`, never `cp -a`**, when materialising the interpreter — uv's managed dir is a symlink.
+- **Dereference the interpreter's root directory** when materialising it — uv's managed dir is a symlink and a link-preserving copy vendors nothing. In a shell: `cp -aL`, never `cp -a`. Python's `shutil.copytree` follows a symlinked source root regardless of `symlinks=`, so the hazard does not arise there; do not restate them as equivalent.
 - **Delete `lib/python<version>/EXTERNALLY-MANAGED`** from the vendored tree (version comes from `porter.yaml`, never hardcoded).
 - **`--break-system-packages`** on `uv pip install` into the vendored interpreter.
 - **`python -m <module>`, never `bin/` console scripts** — their shebangs are absolute build paths.
