@@ -142,8 +142,19 @@ def vendor(dest: Path, version: str = DEFAULT_VERSION) -> Path:
     return binary
 
 
-def install(python_bin: Path, requirements: list[str], constraints: Path | None = None) -> None:
+def install(python_bin: Path, requirements: list[str], constraints: Path | None = None,
+            target: Path | None = None) -> None:
     """Install packages into the vendored interpreter's own site-packages.
+
+    `target` moves them somewhere else instead, and exists for the one case
+    where the interpreter's own site-packages is not ours to write to: a
+    **shared** interpreter (`python: {package: <name>}`) lives in a package of
+    its own, installed once for every component. Two components writing
+    `fastapi` into it would be a dpkg file conflict on the client, and the
+    interpreter package would carry every component's wheels. `--target` puts
+    them in the component's own payload root instead; see
+    `assemble._install_requirements`. The wheels are still selected for
+    `--python`, so the ABI is the shared interpreter's and not the build host's.
 
     `--break-system-packages` is NOT redundant, but it is a no-op on the tree
     `vendor()` hands over, because `vendor()` deleted EXTERNALLY-MANAGED two
@@ -165,5 +176,7 @@ def install(python_bin: Path, requirements: list[str], constraints: Path | None 
     cmd = ["uv", "pip", "install", "--python", str(python_bin), "--break-system-packages"]
     if constraints:
         cmd += ["--constraint", str(constraints)]
+    if target:
+        cmd += ["--target", str(target)]
     cmd += list(requirements)
     _run(cmd)

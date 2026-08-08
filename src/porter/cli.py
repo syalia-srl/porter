@@ -25,7 +25,7 @@ from typing import Annotated
 import microcli as m
 import yaml
 
-from porter.assemble import assemble
+from porter.assemble import assemble, assemble_interpreter
 from porter.bake import bake
 from porter.deb import build_deb
 from porter.desktop import (
@@ -56,9 +56,44 @@ def build(
     # case is unchanged.
     parsed = load(manifest_path)
     siblings = [c for c, _ in parsed.components]
-    built = [(c, _build_one(c, py, manifest_path, out, stage, siblings))
-             for c, py in parsed.components]
-    debs = [deb for _, deb in built]
+
+    # The shared interpreters first, because their stages have to outlive the
+    # components: `assemble` execs the STAGED binary to select each component's
+    # wheels and to answer its import probes, and reads the package's exact
+    # version off it for the `Depends:` line. A component built after the stage
+    # was cleaned would have nothing to probe with.
+    #
+    # A manifest with no `python.package` builds none of these and the loop
+    # below is exactly what it was -- the bundled path is untouched.
+    interpreters: dict[str, object] = {}
+    stages: list[tuple[Path, bool]] = []
+    debs: list[Path] = []
+    try:
+        for python in parsed.interpreters:
+            # Architecture and maintainer come from a component that asked for
+            # this interpreter: they are shared top-level keys in every manifest
+            # that declares one, and inventing porter's own defaults here would
+            # put a package on the USB whose Maintainer disagrees with every
+            # other package beside it.
+            owner = next(c for c, py in parsed.components
+                         if py.package == python.package)
+            stage_dir = Path(stage) / python.package
+            # Same ownership rule as `_build_one`: porter removes only what
+            # porter made.
+            stages.append((stage_dir, not stage_dir.exists()))
+            interp = assemble_interpreter(python, stage_dir,
+                                          architecture=owner.architecture,
+                                          maintainer=owner.maintainer)
+            interpreters[python.package] = interp
+            debs.append(build_deb(interp.stage, interp.control, Path(out)))
+        built = [(c, _build_one(c, py, manifest_path, out, stage, siblings,
+                                interpreters.get(py.package)))
+                 for c, py in parsed.components]
+    finally:
+        for stage_dir, ours in stages:
+            if ours:
+                shutil.rmtree(stage_dir, ignore_errors=True)
+    debs += [deb for _, deb in built]
     # After the components, so that a role's dependencies are on disk beside it
     # in `out` when the last line is printed. Nothing enforces the order --
     # dpkg-deb resolves nothing at build time -- but a USB assembled from a
@@ -118,7 +153,7 @@ def _field(deb: Path, name: str) -> list[str]:
 
 
 def _build_one(component, python, manifest_path: Path, out: str, stage: str,
-               siblings) -> Path:
+               siblings, interpreter=None) -> Path:
     # Source paths are relative to the manifest, so a build run from anywhere
     # stages the same tree. A cwd-relative read is the shape that works in the
     # repo root and fails in CI.
@@ -147,7 +182,8 @@ def _build_one(component, python, manifest_path: Path, out: str, stage: str,
         # which build it is running.
         baked = bake(component, manifest_path.parent)
         staged = assemble(component, python, manifest_path.parent, stage_dir,
-                          stamp=baked.stamp, siblings=siblings)
+                          stamp=baked.stamp, siblings=siblings,
+                          interpreter=interpreter)
         deb = build_deb(staged.stage, staged.control, Path(out),
                         conffiles=staged.conffiles, scripts=staged.scripts)
     finally:

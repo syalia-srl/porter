@@ -64,7 +64,10 @@ evidence; this is the short form.
     whether it is bundled per component or emitted as its own package, is
     declared in each project's `porter.yaml`. No vendor prefix belongs in porter.
     The same rule governs the optional bundled browser: the project declares the
-    URL and checksum, porter picks no vendor.
+    URL and checksum, porter picks no vendor. A shared interpreter package is
+    versioned by the **CPython version its tree reports**, not by the project's,
+    and components depend on it with `(= <that version>)` — `>=` would let a
+    client keep an older tree and run wheels compiled against a newer ABI.
 11. **`Depends:` is derived from `ldd`, never hand-written.** Any bundled native
     binary gets its libraries mapped to target-distro packages at build time. A
     hand-kept list is how a package installs cleanly and then cannot open a
@@ -129,8 +132,13 @@ does not subsume `test_unit_carries_the_hardening_and_restart_directives_...`;
 the two are orthogonal and both are needed (measured 2026-08-08: deleting
 `ProtectSystem=strict` leaves `verify` perfectly clean).
 
-**All three CI-armed.** They are in `.github/workflows/ci.yml`'s `env:` block.
-Adding a fourth such variable means adding it there too, or the gate can go
+**`PORTER_REQUIRE_CC=1` is the fourth**, added with Task 13. `native_binaries:`
+is proved against a *real* compiled object — the point of the feature is that
+the ELF header is read rather than described — so on a host with no C compiler
+every test covering rule 11's derivation skips, and a skipped test is green.
+
+**All four CI-armed.** They are in `.github/workflows/ci.yml`'s `env:` block.
+Adding a fifth such variable means adding it there too, or the gate can go
 green having skipped exactly the thing the variable exists to force.
 
 **Purge `__pycache__` after any edit-run-restore cycle** (mutation testing, a
@@ -248,8 +256,27 @@ clean tree. `find src tests -name __pycache__ -type d -exec rm -rf {} +`.
 - **Tasks 5–8 and 12 done:** the USB apt repo and autonomous `install.sh`, the
   Docker gate with mutation bundles, `Depends:` from ELF headers, the
   `<app>-desktop` split, and the `build:` escape hatch. Nine examples build.
-- **Next:** Tasks 13 (shared interpreter, native binaries), 14 (nspawn gate,
-  repo signing) and 15 (release).
+- **Task 13 done:** `python: {package: <name>}` emits a **separate interpreter
+  package** and components `Depends:` on it by exact version — one 97 MB tree
+  instead of one per component (ainbox: ~780 MB saved across ten services).
+  Its version is the **CPython version the staged tree reports**, not the
+  project's: components may carry different `version:` values, and a
+  project-keyed exact pin would be unsatisfiable for whichever disagreed.
+  A shared-interpreter component's requirements go to `/usr/lib/<pkg>/` with
+  `uv pip install --target` and **never** into the interpreter's own
+  `site-packages` — that directory belongs to a package every component
+  installs, so two components wanting `fastapi` there is a dpkg file conflict
+  at the client. The payload root is already `WorkingDirectory` and the
+  wrapper's `PYTHONPATH`, so nothing about sys.path had to be invented and
+  `systemd.py` is untouched. `bundled` is unchanged.
+  `native_binaries:` stages compiled payload under `/usr/lib/<pkg>/` with the
+  mode intact and derives `Depends:` from its ELF headers; a binary linking a
+  soname neither the payload nor the build host provides is **refused before
+  anything is staged**, naming the sonames. `examples/shared-interpreter`
+  (3 `.deb`s: interpreter + service + command) and `examples/native-binary`
+  (a `cc`-built program beside its own private `.so`) are the gallery entries;
+  `PORTER_REQUIRE_CC=1` is the fourth armed variable.
+- **Next:** Tasks 14 (nspawn gate, repo signing) and 15 (release).
 
 - **Next:** the nspawn gate, which is where the emitted unit is
   finally *started* by systemd. Nothing so far has run one. What *is* exercised:

@@ -68,7 +68,11 @@ from pathlib import Path
 # and two copies of that decision is one copy that can be relaxed alone.
 from porter.bake import _bash
 from porter.config import env_postinst, setup_script, split
-from porter.depends import derive_depends
+from porter.depends import (
+    ELF_MAGIC,
+    derive_depends,
+    refuse_a_native_object_the_target_cannot_run,
+)
 from porter.interpreter import install, vendor
 from porter.systemd import resolve_ordering, timer, unit
 from porter.types import Component, Python
@@ -100,6 +104,56 @@ SHELL_IDENTIFIER = re.compile(r"[A-Za-z_][A-Za-z0-9_]*\Z")
 
 
 @dataclass
+class Interpreter:
+    """A vendored interpreter that lives in a package of its own.
+
+    The measurement this shape exists for: the tree is **97 MB before a single
+    dependency**, and ainbox has ten services. Bundled, that is ~780 MB of the
+    same bytes ten times over on one USB stick and in one client's /usr/lib.
+    Shared, it is 97 MB once and a `Depends:` line per component.
+
+    `version` is the **full CPython version the staged tree reports** --
+    `3.12.13`, not the project's `1.0`. Two reasons, and the first is a
+    correctness one: components may carry different `version:` values, and an
+    exact-version dependency keyed on the project's would then be unsatisfiable
+    for whichever component disagreed. The second is that the interpreter is not
+    a thing the project versions -- rebuilding a project must not churn a 30 MB
+    package whose contents did not change, and a patch bump of CPython *must*
+    churn it, because a component's compiled wheels were selected against that
+    ABI.
+
+    `python_bin` is the staged binary on the **build host** -- what the import
+    probes exec and what `uv pip install --python` selects wheels for.
+    `installed_python` is the path on the **client**, which is what reaches
+    ExecStart and the wrapper. Keeping the two apart is rule 1's whole subject:
+    an ExecStart naming a build directory works perfectly on the machine that
+    produced it.
+    """
+
+    package: str
+    version: str
+    python_version: str
+    stage: Path
+    python_bin: Path
+    control: dict[str, str]
+
+    @property
+    def installed_python(self) -> str:
+        return f"/usr/lib/{self.package}/python/bin/python{self.python_version}"
+
+    @property
+    def exact_dependency(self) -> str:
+        """What a component puts in `Depends:`. Exact, and that is the point.
+
+        `>=` would let a client keep an older interpreter that satisfies the
+        constraint and run wheels compiled against a newer ABI -- an install at
+        rc=0 and an `ImportError` in a unit's status. The whole USB moves
+        together or not at all.
+        """
+        return f"{self.package} (= {self.version})"
+
+
+@dataclass
 class Staged:
     """Everything `build_deb` needs, so the caller re-derives none of it.
 
@@ -115,7 +169,8 @@ class Staged:
     scripts: dict[str, str]
 
 
-def _refuse_what_porter_cannot_emit(component: Component, python: Python) -> None:
+def _refuse_what_porter_cannot_emit(component: Component, python: Python,
+                                    interpreter: Interpreter | None) -> None:
     """Refuse the shapes porter could only package *wrongly*.
 
     Each of these has a plausible-looking wrong answer, which is why it is a
@@ -124,10 +179,14 @@ def _refuse_what_porter_cannot_emit(component: Component, python: Python) -> Non
     - **A misspelled kind.** `kind: sevice` would otherwise stage a payload with
       no unit and no wrapper: a .deb that builds, lints, installs cleanly and
       does nothing at all.
-    - **An interpreter porter does not bundle.** `python.package: <name>` means
-      the interpreter arrives in a package of its own; nothing yet knows where
-      that package puts it, so ExecStart, the wrapper and the import probe would
-      all be guesses at a path.
+    - **A shared interpreter nobody built.** `python.package: <name>` means the
+      interpreter arrives in a package of its own, and `assemble_interpreter`
+      is what builds it. A caller that declares one and hands over no
+      `interpreter=` has no path to put in ExecStart, no binary to probe
+      imports with and no version to depend on -- and the plausible wrong answer
+      is to fall back to bundling, which would emit a package that works
+      perfectly and is 97 MB larger than the manifest asked for, with the
+      shared package never built and every other component depending on it.
     - **A command with config.** postinst creates `/etc/<pkg>/env` at
       `600 root:root`, which a command run by a non-root operator cannot read,
       and the wrapper does not source `/etc/<pkg>/defaults`, so the shipped half
@@ -178,12 +237,37 @@ def _refuse_what_porter_cannot_emit(component: Component, python: Python) -> Non
             "payload with neither a unit nor a wrapper -- a package that installs "
             "and does nothing"
         )
-    if not python.bundled:
+    if python.bundled and interpreter is not None:
         raise ValueError(
-            f"python.package={python.package!r} is not implemented: only 'bundled' "
-            "is. An interpreter shipped in a package of its own has no known "
-            "install path here, so ExecStart would be a guess"
+            f"component {component.name!r} declares python.package: 'bundled' and "
+            f"was handed the shared interpreter {interpreter.package!r}. One of "
+            "the two is a mistake, and the silent reading -- bundle anyway -- "
+            "ships a second 97 MB interpreter the manifest did not ask for"
         )
+    if not python.bundled:
+        if interpreter is None:
+            raise ValueError(
+                f"component {component.name!r} declares python.package="
+                f"{python.package!r} and no interpreter package was built for it. "
+                "`porter build` builds one per distinct (package, version) in the "
+                "manifest and hands it to `assemble`; a caller that does not is "
+                "asking for an ExecStart porter would have to guess"
+            )
+        if interpreter.package != python.package:
+            raise ValueError(
+                f"component {component.name!r} declares python.package="
+                f"{python.package!r} and was handed {interpreter.package!r}. The "
+                "component would Depends: on one package and ExecStart the path "
+                "of the other -- an install that resolves and a service that "
+                "cannot start"
+            )
+        if interpreter.python_version != python.version:
+            raise ValueError(
+                f"component {component.name!r} declares python.version="
+                f"{python.version!r} and was handed an interpreter package built "
+                f"for {interpreter.python_version!r}. ExecStart names "
+                f"python{python.version}, which that package does not contain"
+            )
     if component.kind != "oneshot" and component.schedule:
         raise ValueError(
             f"component {component.name!r} is kind {component.kind!r} and declares "
@@ -389,6 +473,139 @@ def _refuse_a_source_directory_below_the_import_root(
             )
 
 
+def _refuse_a_native_binary_that_cannot_be_staged(
+        src_root: Path, native_binaries: list[str]) -> list[Path]:
+    """Everything about a declared native binary that is checkable off disk.
+
+    Three refusals, and the second is the one that costs a client a callout:
+
+    - **Absent, or not a file.** `native_binaries: [build/probe]` before the
+      bake step that compiles it is a manifest whose payload does not exist.
+    - **Not executable, unless it is a shared library.** dpkg preserves the
+      mode it finds in the tree, so a program staged 644 installs at rc=0 and
+      cannot be exec'd -- "Permission denied" from a wrapper or a unit, with
+      the file visibly present and the right size. `chmod`ing it here would be
+      repair, and the source tree is the adopter's: a build that produced a
+      non-executable program produced the wrong thing. A `.so` is exempt
+      because it is data to the loader and Debian ships shared libraries 644;
+      refusing one would refuse the CUDA libraries this feature exists for. The
+      predicate is the name, which is the same one `depends._self_shipped`
+      already uses to decide what a payload provides for itself -- one spelling
+      of "this is a library", not two.
+    - **Not an ELF object.** A shell script, a `.tar.gz` or a wrapper named like
+      a binary has no `NEEDED` entries at all, so `derive_depends` would return
+      an empty list for it and every dependency it really has would go
+      undeclared. That is exactly rule 11's failure with the check apparently
+      passing. `source:` or `data:` is where a non-ELF file belongs.
+
+    Returns the resolved paths so the soname check below reads them once.
+    """
+    resolved = []
+    for entry in native_binaries:
+        path = src_root / entry
+        if not path.is_file():
+            raise ValueError(
+                f"native binary {entry!r} is not a file at {path}. The path is "
+                "relative to the manifest's own directory; if a bake step "
+                "compiles it, declare that step and its artifact so the build "
+                "fails on the missing binary rather than on this line"
+            )
+        if ".so" not in path.name and not path.stat().st_mode & 0o111:
+            raise ValueError(
+                f"native binary {entry!r} is not executable ({path.stat().st_mode & 0o777:o}). "
+                "dpkg preserves the mode it finds, so it would install at rc=0 "
+                "and fail with 'Permission denied' at its first exec on the "
+                "client. chmod it in the source tree or in the bake step"
+            )
+        with path.open("rb") as fh:
+            if fh.read(4) != ELF_MAGIC:
+                raise ValueError(
+                    f"native binary {entry!r} is not an ELF object. porter derives "
+                    "Depends: from ELF headers (rule 11), so this one would "
+                    "contribute nothing and whatever it really needs would go "
+                    "undeclared -- the package installs cleanly and cannot run. "
+                    "Stage a script under source: or a blob under data:"
+                )
+        resolved.append(path)
+    return resolved
+
+
+def _copy_into_the_payload_root(libdir: Path, src: Path, entry: str,
+                                what: str) -> Path:
+    """Stage one entry under its own basename in /usr/lib/<pkg>/, or refuse.
+
+    Four things write into that one directory -- the vendored interpreter
+    (`python/`), the component's requirements when the interpreter is shared,
+    `source:` and `native_binaries:` -- and a basename collision between any two
+    of them is silent in every direction that matters. `shutil.copy2` onto an
+    existing file overwrites it; onto an existing *directory* it writes the file
+    inside, so a `source: [python]` would land in the interpreter tree and the
+    module would not be importable at all. `copytree` raises, but with
+    `FileExistsError` naming a staging path an adopter has never seen.
+
+    So: refuse, name both the entry and the directory, and say what else writes
+    there. This is the same argument as `RESERVED_SHARE_NAMES` one directory
+    over, generalised -- porter's characteristic bug is the input that is
+    accepted and then overwritten by porter itself.
+    """
+    dest = libdir / Path(entry).name
+    if dest.exists():
+        raise ValueError(
+            f"{what} {entry!r} would be staged as {dest.name} in the payload "
+            f"root, and something is already there. That directory holds the "
+            "vendored interpreter ('python'), the component's requirements when "
+            "the interpreter is shared, and every source: and native_binaries: "
+            "entry -- one of them has this basename. Rename it"
+        )
+    if src.is_dir():
+        # symlinks=True: preserved, not dereferenced, so deb.py's lint gets to
+        # see an absolute one rather than a silently inlined copy of whatever it
+        # pointed at on the build host.
+        shutil.copytree(src, dest, symlinks=True)
+    else:
+        # copy2 and not copy: it preserves the mode, which for a native binary
+        # is the difference between a program and a file.
+        shutil.copy2(src, dest)
+    return dest
+
+
+def _install_requirements(component: Component, python: Python,
+                          python_bin: Path, libdir: Path) -> None:
+    """Where a component's wheels go, and it depends on who owns the interpreter.
+
+    **Bundled:** into the interpreter's own `site-packages`, exactly as before.
+    The tree is this package's, so nothing else can collide with it.
+
+    **Shared:** into the payload root, with `--target`. The interpreter's
+    `site-packages` belongs to *another package* -- one every component of the
+    project installs -- so writing there would put `fastapi` in the interpreter
+    .deb, make two components that both want it a dpkg file conflict on the
+    client, and rebuild 97 MB whenever any component's requirements changed.
+
+    `/usr/lib/<pkg>` is already the unit's `WorkingDirectory` and already what
+    the wrapper puts on `PYTHONPATH`, so nothing about sys.path has to be
+    invented: `python -m` prepends the working directory and the wheels are in
+    it. Precedence is the same as bundled's, too -- the payload's own modules
+    are found before anything installed, because they are in the same directory
+    and the collision above is refused rather than resolved.
+
+    The `bin/` directory and the `.lock` file `--target` writes are removed.
+    Those scripts' shebangs are absolute build-host paths -- rule 3 is that
+    porter never runs one, so shipping them is a directory of files that look
+    runnable on the client and are not; the lock is uv's own bookkeeping. Both
+    are porter's byproduct and not the adopter's input, which is why removing
+    them is not the "repair" the refusals above forbid.
+    """
+    if not component.requirements:
+        return
+    if python.bundled:
+        install(python_bin, component.requirements)
+        return
+    install(python_bin, component.requirements, target=libdir)
+    shutil.rmtree(libdir / "bin", ignore_errors=True)
+    (libdir / ".lock").unlink(missing_ok=True)
+
+
 def _conffiles(stage: Path) -> list[str]:
     """Every file and symlink staged under `etc/`, as absolute client paths.
 
@@ -469,6 +686,7 @@ def _refuse_a_hook_beside_keys_it_makes_porter_stop_reading(
         ("exec", bool(component.module or component.args)),
         ("source", bool(component.source_paths)),
         ("data", bool(component.data_paths)),
+        ("native_binaries", bool(component.native_binaries)),
         ("requirements", bool(component.requirements)),
         ("env", bool(component.defaults)),
         ("admin_keys", bool(component.admin_keys)),
@@ -663,9 +881,88 @@ def _assemble_by_hook(component: Component, python: Python, src_root: Path,
     return Staged(stage=stage, conffiles=conffiles, control=control, scripts={})
 
 
+def _cpython_version(python_bin: Path, declared: str) -> str:
+    """The full version the STAGED tree reports, asked of the tree itself.
+
+    Not parsed out of the directory name and not taken from the manifest: the
+    manifest says `3.12`, and what the interpreter package must be versioned by
+    is the patch release whose ABI the components' wheels were compiled
+    against. The one authority on that is the binary.
+
+    The prefix check is a positive control on `vendor()`: uv is asked for
+    `3.12` and answers with a tree, and nothing between the request and the
+    staged directory has so far confirmed the two agree. A `3.13` tree under a
+    `python3.12` ExecStart is a package that installs and cannot start.
+    """
+    proc = subprocess.run(
+        [str(python_bin), "-c",
+         "import sys; print('.'.join(map(str, sys.version_info[:3])))"],
+        capture_output=True, text=True)
+    if proc.returncode != 0:
+        raise RuntimeError(
+            f"the staged interpreter at {python_bin} does not run on this build "
+            f"host: rc={proc.returncode} {proc.stderr.strip()}. porter cannot "
+            "version a package around a tree it cannot ask"
+        )
+    full = proc.stdout.strip()
+    if not full.startswith(f"{declared}."):
+        raise RuntimeError(
+            f"the vendored tree reports Python {full} and the manifest declares "
+            f"{declared!r}. ExecStart would name python{declared}, which this "
+            "tree does not contain"
+        )
+    return full
+
+
+def assemble_interpreter(python: Python, stage_root: Path, *,
+                         architecture: str = "amd64",
+                         maintainer: str = "porter <porter@example.com>"
+                         ) -> Interpreter:
+    """Build the shared interpreter's own package. One tree, `Depends:`-ed on.
+
+    Everything a component's bundled interpreter would be, in a .deb of its
+    own and at the same path shape: `/usr/lib/<interp-pkg>/python/`. Nothing
+    else is in it -- no unit, no config, no conffile, no maintainer script and
+    no payload -- so `scripts` is empty and there is nothing for dpkg to run.
+
+    `Depends:` is derived here exactly as it is for a component, and it is not
+    decoration: the tree's single dynamically-linked extension pulls in
+    `libcrypt1`, which is named nowhere in any manifest and which the components
+    no longer carry once the interpreter is theirs no more. If it were dropped,
+    every component would install and every one would fail to import `crypt`.
+
+    The caller keeps the returned `stage` alive while its components build --
+    `python_bin` points into it, and that binary is what selects the components'
+    wheels and answers their import probes.
+    """
+    stage = Path(stage_root).resolve()
+    _open_an_empty_stage(stage)
+    libdir = stage / "usr/lib" / python.package
+    libdir.mkdir(parents=True)
+    python_bin = vendor(libdir, python.version)
+    full = _cpython_version(python_bin, python.version)
+
+    control = {
+        "Package": python.package,
+        "Version": full,
+        "Architecture": architecture,
+        "Maintainer": maintainer,
+        "Description": (
+            f"CPython {full}, vendored by porter and shared by this project's "
+            f"components"),
+    }
+    depends = derive_depends(stage)
+    if depends:
+        control["Depends"] = ", ".join(depends)
+    return Interpreter(package=python.package, version=full,
+                       python_version=python.version, stage=stage,
+                       python_bin=python_bin, control=control)
+
+
 def assemble(component: Component, python: Python,
              src_root: Path, stage_root: Path, stamp: str | None = None,
-             siblings: Sequence[Component] = ()) -> Staged:
+             siblings: Sequence[Component] = (),
+             interpreter: Interpreter | None = None) -> Staged:
     """Stage `component` under `stage_root`. Returns what `build_deb` needs.
 
     `stamp` is `porter.bake`'s provenance block, written to
@@ -698,30 +995,36 @@ def assemble(component: Component, python: Python,
     if component.build:
         return _assemble_by_hook(component, python, src_root, stage, stamp)
 
-    _refuse_what_porter_cannot_emit(component, python)
+    _refuse_what_porter_cannot_emit(component, python, interpreter)
     _refuse_a_source_directory_below_the_import_root(src_root, component.source_paths)
-    # Before 97 MB is vendored: a cycle or a misspelled `after:` is a property
-    # of the manifest and needs nothing staged to detect.
+    # Before 97 MB is vendored, all three of them: a cycle, a misspelled
+    # `after:`, a native binary that is missing, unreadable or links a library
+    # nothing on the target provides are all properties of the source tree and
+    # the manifest, and none of them needs anything staged to detect.
     depends_on = resolve_ordering(list(siblings) or [component])[component.name]
+    natives = _refuse_a_native_binary_that_cannot_be_staged(
+        src_root, component.native_binaries)
+    refuse_a_native_object_the_target_cannot_run(natives)
 
     _open_an_empty_stage(stage)
 
     libdir = stage / "usr/lib" / pkg
     libdir.mkdir(parents=True)
-    python_bin = vendor(libdir, python.version)
-    if component.requirements:
-        install(python_bin, component.requirements)
+    # The bundled interpreter goes in the payload root; a shared one is already
+    # a package of its own and only its staged binary is borrowed, to select
+    # wheels and answer the import probes.
+    python_bin = vendor(libdir, python.version) if python.bundled \
+        else interpreter.python_bin
+    _install_requirements(component, python, python_bin, libdir)
 
     for entry in component.source_paths:
-        src = src_root / entry
-        dest = libdir / Path(entry).name
-        if src.is_dir():
-            # symlinks=True: preserved, not dereferenced, so deb.py's lint gets
-            # to see an absolute one rather than a silently inlined copy of
-            # whatever it pointed at on the build host.
-            shutil.copytree(src, dest, symlinks=True)
-        else:
-            shutil.copy2(src, dest)
+        _copy_into_the_payload_root(libdir, src_root / entry, entry, "source entry")
+
+    # Beside the source and not under /usr/share: these are programs the unit or
+    # the wrapper execs, and /usr/lib/<pkg> is the directory the package already
+    # owns and already resolves paths against.
+    for entry, src in zip(component.native_binaries, natives):
+        _copy_into_the_payload_root(libdir, src, entry, "native binary")
 
     # Baked data goes to /usr/share/<pkg>, which is the FHS contract's home for
     # it, and NOT to /usr/lib/<pkg> with the source. That directory is the unit's
@@ -747,7 +1050,8 @@ def assemble(component: Component, python: Python,
     # The paths as they will be ON THE CLIENT, never the staging paths: an
     # ExecStart naming a build directory is the exact class of bug rule 1 is
     # about, and it works perfectly on the machine that produced it.
-    installed_python = f"/usr/lib/{pkg}/python/bin/python{python.version}"
+    installed_python = f"/usr/lib/{pkg}/python/bin/python{python.version}" \
+        if python.bundled else interpreter.installed_python
     workdir = f"/usr/lib/{pkg}"
     scripts: dict[str, str] = {}
 
@@ -830,6 +1134,14 @@ def assemble(component: Component, python: Python,
     # ships no empty field. `derive_depends` refuses rather than shortens: an
     # object it cannot read is not an object with no dependencies.
     depends = derive_depends(stage)
+    # First, and by exact version. A shared interpreter is the one dependency
+    # nothing in the stage can reveal -- it is in another package, so there is
+    # no ELF header here that names it and `derive_depends` is structurally
+    # blind to it. Without this line the component installs perfectly on a
+    # client that has never seen the interpreter package, and ExecStart names a
+    # path that does not exist.
+    if interpreter is not None:
+        depends.insert(0, interpreter.exact_dependency)
     if depends:
         control["Depends"] = ", ".join(depends)
     return Staged(stage=stage, conffiles=_conffiles(stage),

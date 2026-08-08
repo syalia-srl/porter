@@ -1,0 +1,84 @@
+# porter's example gallery: one interpreter, several components.
+#
+# **The measurement.** A vendored python-build-standalone tree is 97 MB before a
+# single dependency. ainbox has ten services; bundled, that is ~780 MB of the
+# same bytes ten times over -- on the USB stick, in the client's /usr/lib, and
+# in every backup of it. `python: {package: <name>}` makes it one package that
+# every component depends on, and the rest of the manifest does not change.
+#
+# What `porter build` emits here -- THREE .debs, and the first one is the point:
+#
+#   porter-example-shared-python   the interpreter, ~30 MB compressed. No unit,
+#                                  no config, no maintainer script, no payload.
+#                                  Versioned by the CPython version it holds
+#                                  (3.12.x), not by this file's `version:`.
+#   porter-example-shared-api      a service.  Depends: the above, EXACT version.
+#   porter-example-shared-tool     a command.  Depends: the above, EXACT version.
+#
+# **Exact, and that is deliberate.** `>=` would let a client keep an older
+# interpreter that satisfies the constraint and run wheels compiled against a
+# newer ABI -- an install at rc=0 and an ImportError in a unit's status. The
+# whole USB moves together or not at all.
+#
+# **Versioned by CPython and not by the project.** Two reasons. Components may
+# carry different `version:` values, and an exact dependency keyed on the
+# project's would be unsatisfiable for whichever one disagreed. And a project
+# rebuild must not churn a 30 MB package whose contents did not change, while a
+# CPython patch bump *must* churn it, because the components' wheels were
+# selected against that ABI.
+#
+# The property this example exists to prove is the one that cannot be assumed:
+# `apt install porter-example-shared-api` off the USB repo, with no network and
+# every network source removed, pulls the interpreter package in on its own and
+# the service then answers. See tests/test_shared_interpreter.py.
+
+version: "1.0"
+maintainer: porter <porter@example.com>
+architecture: amd64
+
+# Written once, at the top, and inherited by both components. That is the whole
+# ask: a manifest that declares this per-component with two different versions
+# is refused by `porter.spec` -- one package cannot hold two interpreters, and
+# porter would otherwise build whichever it staged last while the other
+# component's ExecStart named a python that is not in it.
+python:
+  version: "3.12"
+  package: porter-example-shared-python
+
+components:
+  - name: api
+    package: porter-example-shared-api
+    description: porter's shared-interpreter example -- the HTTP service
+    kind: service
+    source:
+      - src/api.py
+    # A component's OWN requirements, and they do not go into the shared
+    # interpreter. Its site-packages belongs to a package both components
+    # install: two components writing `fastapi` there is a dpkg file conflict on
+    # the client, and it would rebuild 97 MB whenever either one's requirements
+    # changed. porter installs them into /usr/lib/<pkg>/ instead -- the payload
+    # root, which is already this unit's WorkingDirectory and therefore already
+    # on sys.path, so nothing about the ExecStart below changes.
+    requirements:
+      - fastapi
+      - uvicorn
+    exec:
+      module: uvicorn
+      args: ["api:app", "--host", "127.0.0.1", "--port", "${PORT}"]
+    env:
+      PORT: "9104"
+
+  - name: tool
+    package: porter-example-shared-tool
+    description: porter's shared-interpreter example -- the operator CLI
+    kind: command
+    bin_name: porter-shared-tool
+    source:
+      - src/tool.py
+    # None. Between them the two components show both halves: one that needs
+    # wheels and one that needs nothing, sharing an interpreter that carries
+    # neither.
+    requirements: []
+    exec:
+      module: tool
+      args: []

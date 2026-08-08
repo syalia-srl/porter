@@ -58,6 +58,7 @@ COMPONENT_KEYS = frozenset({
     "name", "package", "version", "description", "maintainer", "architecture",
     "kind", "python", "requirements", "exec", "source", "data", "bake", "env",
     "admin_keys", "bin_name", "after", "schedule", "migrations", "build",
+    "native_binaries",
 })
 # The keys ONLY the built-in assembler reads. A `build:` component's script
 # writes the whole stage -- interpreter, payload, unit, wrapper, config, the lot
@@ -75,6 +76,7 @@ COMPONENT_KEYS = frozenset({
 ASSEMBLER_ONLY_KEYS = frozenset({
     "kind", "exec", "python", "requirements", "source", "data", "env",
     "admin_keys", "bin_name", "after", "schedule", "migrations",
+    "native_binaries",
 })
 # The top level is the component keys (a flat manifest is one component written
 # there) plus the blocks that may only appear at the top. `desktop:` is one of
@@ -156,6 +158,12 @@ class Manifest:
     components: list[tuple[Component, Python]]
     metapackages: list[Metapackage]
     path: Path
+    # The distinct shared interpreters this manifest asks porter to emit a
+    # package for -- one per `python.package` that is not `bundled`. Computed
+    # here rather than by `porter build` because the refusals it needs are
+    # cross-component ones, and a caller re-deriving the list is a caller that
+    # can derive a different one.
+    interpreters: list[Python] = field(default_factory=list)
 
 
 def _refuse_unknown_keys(where: str, mapping: Mapping, allowed: frozenset) -> None:
@@ -233,6 +241,49 @@ def _refuse_two_packages_with_one_name(where: str, names: list[str]) -> None:
             "declared twice. Both would be written to one .deb filename and the "
             "second would overwrite the first, silently, at rc=0"
         )
+
+
+def _shared_interpreters(where: str, pairs: list[tuple[Component, Python]],
+                         package_names: list[str]) -> list[Python]:
+    """The interpreter packages to build, and the two ways the ask is incoherent.
+
+    - **One name, two versions.** Two components declaring
+      `python: {package: proj-python}` with `version: 3.12` and `version: 3.13`
+      describe one package holding two trees. porter builds one, whichever it
+      staged last, and the other component's ExecStart names a `python3.13`
+      that is not in it -- an install apt resolves happily and a service that
+      never starts. There is no merge available: the package has one payload.
+    - **A name something else already claims.** An interpreter package sharing
+      a name with a component or a metapackage is two .debs written to one
+      filename, the second overwriting the first -- the same failure
+      `_refuse_two_packages_with_one_name` exists for, arriving through a key
+      that check cannot see because `python.package` is not a package *entry*.
+      Whichever lands second wins, at rc=0, and the USB carries a 97 MB
+      interpreter under a component's name or a component under the
+      interpreter's.
+    """
+    by_name: dict[str, Python] = {}
+    for component, python in pairs:
+        if python.bundled:
+            continue
+        if python.package in package_names:
+            raise ValueError(
+                f"{where}: component {component.name!r} declares python.package="
+                f"{python.package!r}, which is also the name of a package this "
+                "manifest builds. Both .debs would be written to one filename and "
+                "the second would overwrite the first, silently, at rc=0"
+            )
+        seen = by_name.get(python.package)
+        if seen is not None and seen.version != python.version:
+            raise ValueError(
+                f"{where}: python.package={python.package!r} is declared with "
+                f"version {seen.version!r} and version {python.version!r}. One "
+                "package cannot hold two interpreters -- porter would build "
+                "whichever it staged last, and the other component's ExecStart "
+                "would name a python that is not in it"
+            )
+        by_name[python.package] = python
+    return list(by_name.values())
 
 
 def _refuse_assembler_keys_beside_a_build_hook(where: str, written: Mapping) -> None:
@@ -341,9 +392,9 @@ def load(path: Path | str) -> Manifest:
     # depended on the shadowed one is reported as naming a component "no
     # component in this manifest builds" -- which is false, and sends the
     # adopter to the wrong line of the manifest.
-    _refuse_two_packages_with_one_name(
-        str(path),
-        [c.package for c, _ in components] + [m.package for m in metapackages])
+    names = [c.package for c, _ in components] + [m.package for m in metapackages]
+    _refuse_two_packages_with_one_name(str(path), names)
     _refuse_a_role_naming_a_package_the_manifest_does_not_build(
         str(path), metapackages, [c for c, _ in components])
-    return Manifest(components=components, metapackages=metapackages, path=path)
+    return Manifest(components=components, metapackages=metapackages, path=path,
+                    interpreters=_shared_interpreters(str(path), components, names))

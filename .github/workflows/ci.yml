@@ -15,10 +15,16 @@ on:
 # it guards the only check that every directive in the emitted unit is one
 # systemd recognises, and a slimmer runner image is exactly where the binary
 # would quietly not be there.
+# PORTER_REQUIRE_CC is the fourth, added with Task 13. `native_binaries:` is
+# proved against a REAL compiled object -- the whole point is that the ELF
+# header is read rather than described -- so a runner without a C compiler
+# would skip every test that covers rule 11's derivation, and a skipped test is
+# green.
 env:
   PORTER_REQUIRE_UV: "1"
   PORTER_REQUIRE_DOCKER: "1"
   PORTER_REQUIRE_SYSTEMD: "1"
+  PORTER_REQUIRE_CC: "1"
 
 jobs:
   tests:
@@ -43,6 +49,8 @@ jobs:
           # naming it here turns that into one legible line instead of a
           # failure discovered midway through the suite.
           command -v systemd-analyze >/dev/null || { echo "systemd-analyze missing"; exit 1; }
+          # Same bargain for the compiler examples/native-binary bakes with.
+          command -v cc >/dev/null || { echo "cc missing"; exit 1; }
           docker version --format '{{.Server.Version}}'
           df -h / | tail -1
 

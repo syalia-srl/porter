@@ -23,9 +23,10 @@ class Python:
     porter hardcodes no version -- rule 10 -- so `version` comes from the
     manifest and reaches `interpreter.vendor()` unaltered. `package` is
     `bundled` (the interpreter lives inside this component's .deb) or the name
-    of a package that provides it. Only `bundled` exists today; see
-    `assemble._refuse_what_porter_cannot_emit` for why the other is a refusal
-    rather than a default.
+    of a package porter emits for it -- one 97 MB tree that every component of
+    the project `Depends:` on by exact version, rather than one apiece.
+    `assemble.assemble_interpreter` builds that package and
+    `assemble.Interpreter` is what a component is handed to reach it.
     """
 
     version: str = "3.12"
@@ -85,6 +86,14 @@ class Component:
     # import root: a corpus staged there is on sys.path, and a `data/` entry
     # holding a stray .py would be refused by a check meant for source.
     data_paths: list[str] = field(default_factory=list)
+    # Paths relative to `src_root`, staged under their own basename in
+    # /usr/lib/<pkg>/ beside the source -- compiled programs the project built
+    # or vendored, `llama-server` and its CUDA libraries being the case this
+    # exists for. Separate from `source_paths` because they are not Python and
+    # nothing about them is importable: they are copied with their mode intact
+    # and read by `depends.derive_depends`, which is where rule 11's `Depends:`
+    # comes from.
+    native_binaries: list[str] = field(default_factory=list)
     requirements: list[str] = field(default_factory=list)
     # The `bake:` block. Commands run in src_root before anything is staged,
     # and what they must have produced. See porter.bake.
@@ -149,6 +158,7 @@ class Component:
                 args=list(manifest.get("exec", {}).get("args", [])),
                 source_paths=list(manifest.get("source", [])),
                 data_paths=list(manifest.get("data", [])),
+                native_binaries=list(manifest.get("native_binaries", [])),
                 requirements=list(manifest.get("requirements", [])),
                 bake_steps=list(bake.get("steps", [])),
                 # `.get("min_bytes")` and not `["min_bytes"]`: an omitted

@@ -174,6 +174,48 @@ def packages_owning(paths: list[Path]) -> list[str]:
     return sorted({pkg for names in owners.values() for pkg in names})
 
 
+def refuse_a_native_object_the_target_cannot_run(objects: list[Path]) -> None:
+    """Refuse a declared native binary whose libraries do not resolve, by name.
+
+    The same predicate `resolve_sonames` applies to a staged tree, run against
+    the **source** files instead and therefore *before* 97 MB of interpreter is
+    vendored on top of a payload that cannot start. `assemble` calls both: this
+    one early, on `native_binaries:` as the manifest declares them, and
+    `derive_depends` at the end on everything that was actually staged. Neither
+    subsumes the other -- this one sees only what the manifest names, and that
+    one sees only what survived staging.
+
+    Better a red build than a package that installs and cannot start. A binary
+    whose `NEEDED` entries the build host cannot resolve is one the airgapped
+    client certainly cannot: apt has nothing to fetch and no network to fetch it
+    over, and the failure surfaces as an exec that dies with a linker error in a
+    unit's status, weeks later, on a machine nobody can ssh into.
+
+    What counts as provided by the payload is the **declared set itself** --
+    `llama-server` beside the `libggml*.so` and CUDA libraries the project
+    vendors with it, which is the shape this exists for. Deliberately not the
+    whole staged tree, because the tree does not exist yet; the consequence is
+    that a native object linking something only the *interpreter* tree carries
+    is refused here and would have passed later. Ship it in `native_binaries:`
+    or accept the refusal -- there is no reading of it that is silent.
+    """
+    provided = {path.name for path in objects}
+    cache = _library_cache()
+    for obj in objects:
+        missing = sorted(so for so in _sonames(obj)
+                         if PurePosixPath(so).name not in provided and so not in cache)
+        if missing:
+            raise RuntimeError(
+                f"native binary {obj.name} links {', '.join(missing)}, which "
+                f"`ldconfig -p` on this build host does not resolve and this "
+                f"payload does not ship ({', '.join(sorted(provided))}). The "
+                "client has neither, and no network to fetch them over: the "
+                "package would install at rc=0 and the binary would die at its "
+                "first exec. Add the library to native_binaries:, or install "
+                "the distro package that provides it on the build host"
+            )
+
+
 def derive_depends(tree: Path) -> list[str]:
     """The target-distro packages every native object under `tree` needs.
 

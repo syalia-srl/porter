@@ -54,10 +54,19 @@ def test_refuses_a_kind_it_has_no_branch_for(tmp_path, src_tree):
         assemble(_cmd(kind="sevice"), PY, src_tree, tmp_path / "s")
 
 
-def test_refuses_an_interpreter_it_does_not_bundle(tmp_path, src_tree):
-    """An interpreter shipped in its own package has no known install path here,
-    so ExecStart and the wrapper would both name a guess."""
-    with pytest.raises(ValueError, match="not implemented"):
+def test_refuses_a_shared_interpreter_nobody_built(tmp_path, src_tree):
+    """GUARD. Until Task 13 this was refused outright ("not implemented").
+
+    Now `python.package: <name>` is a real shape and the refusal moved to the
+    incoherent half of it: a component asking for a shared interpreter that no
+    caller built. The plausible wrong answer is to fall back to bundling, which
+    emits a package that works, is 97 MB larger than the manifest asked for,
+    and leaves every sibling depending on a package nothing produced.
+
+    `tests/test_shared_interpreter.py` is where the shape that replaced it is
+    pinned.
+    """
+    with pytest.raises(ValueError, match="no interpreter package was built"):
         assemble(_cmd(), Python(version="3.12", package="porter-python312"),
                  src_tree, tmp_path / "s")
 

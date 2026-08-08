@@ -1,0 +1,89 @@
+# porter's example gallery: a package whose real payload is compiled.
+#
+# ainbox's engine ships a compiled `llama-server` plus a hand-picked set of CUDA
+# libraries. That is the case rule 11 exists for -- **`Depends:` is derived from
+# the ELF headers, never hand-written** -- and until this file existed the field
+# had no example, which by the gallery's own rule means it did not exist.
+#
+# The two halves of the shape, and both are here on purpose:
+#
+#   probe                  a program. Links libc.so.6, which the CLIENT provides
+#                          and apt can name (`libc6`), and libporterprobe.so.1,
+#                          which it does not.
+#   libporterprobe.so.1    a library the PAYLOAD provides. porter must leave it
+#                          out of Depends:, because apt on an airgapped client
+#                          cannot fetch a soname no mirror has ever carried.
+#
+# Nobody would get that pair right by hand, and the hand-written list goes stale
+# silently on the next upstream build. porter reads it out of the headers with
+# `objdump -p` -- never `ldd`, which execs the loader once per file and over a
+# 380 MB tree took long enough to look like a deadlock.
+#
+# What `porter build` emits here:
+#
+#   /usr/lib/porter-example-native/python/                the vendored interpreter
+#   /usr/lib/porter-example-native/runner.py              the payload
+#   /usr/lib/porter-example-native/probe                  the native binary, 0755
+#   /usr/lib/porter-example-native/libporterprobe.so.1    its private library
+#   /usr/bin/porter-probe                                 the wrapper
+#
+# and a control file whose `Depends:` names libc6 and does not name
+# libporterprobe.
+
+package: porter-example-native
+version: "1.0"
+description: porter's example package with a bundled native binary
+maintainer: porter <porter@example.com>
+architecture: amd64
+
+kind: command
+bin_name: porter-probe
+
+# The binary is COMPILED HERE, in the bake stage, rather than committed. A
+# checked-in ELF is a payload nobody can review, pinned to one architecture, and
+# free to stop matching the source that claims to produce it -- which is the
+# same argument `examples/baked-data` makes about a corpus in git.
+#
+# `-Wl,-soname` is what puts a bare `libporterprobe.so.1` in probe's NEEDED
+# entry instead of the build-host path porter would then be unable to map.
+# `-Wl,-rpath,$ORIGIN` is what makes the loader look beside the binary on the
+# CLIENT: without it the package installs at rc=0 and every run dies with
+# "cannot open shared object file". The single quotes around `$ORIGIN` are what
+# keep bash from expanding it: the string has to reach the loader intact, and an
+# expanded one silently becomes the empty rpath.
+bake:
+  steps:
+    - mkdir -p build
+    - cc -O2 -fPIC -shared -Wl,-soname,libporterprobe.so.1 -o build/libporterprobe.so.1 src/helper.c
+    - cc -O2 -o build/probe src/probe.c -Lbuild -l:libporterprobe.so.1 -Wl,-rpath,'$ORIGIN'
+  # Magnitude, not existence: `cc` that wrote a truncated object is not a
+  # failure `test -f` can see. A dynamically linked hello-world measures ~16 KB
+  # here and the library ~15 KB; the floors are the size below which the build
+  # is known to have gone wrong, not a guess at how big they should be.
+  artifacts:
+    - path: build/probe
+      min_bytes: 8000
+    - path: build/libporterprobe.so.1
+      min_bytes: 8000
+
+# Staged under their own basenames in /usr/lib/porter-example-native/, beside
+# the source and with their modes intact. dpkg preserves what it finds, so a
+# binary staged 644 installs at rc=0 and fails with "Permission denied" at its
+# first exec -- porter refuses one rather than chmod'ing it, because a build
+# that produced a non-executable program produced the wrong thing.
+native_binaries:
+  - build/probe
+  - build/libporterprobe.so.1
+
+source:
+  - src/runner.py
+
+python:
+  version: "3.12"
+  package: bundled
+
+requirements: []
+
+exec:
+  module: runner
+  args: []
