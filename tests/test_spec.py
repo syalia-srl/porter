@@ -142,9 +142,19 @@ def test_a_manifest_with_no_metapackages_declares_none():
 def test_refuses_an_unknown_top_level_key(tmp_path, suite_doc):
     """`metapackage:` for `metapackages:`. Read as nothing: the build emits the
     four components at rc=0 and no role at all, and the sysadmin's runbook
-    names a package that is not on the USB."""
+    names a package that is not on the USB.
+
+    The regex names the manifest scope, not just the words. A top-level key
+    porter does not recognise is not excluded from `shared`, so it is merged
+    into every component and refused a second time as an unknown *component*
+    key -- with a message that also reads "unknown key(s) 'metapackage'", only
+    prefixed "component 'api':". `match="unknown key.*metapackage"` therefore
+    passed with the top-level check disabled, which is what
+    scripts/reverify-guards.sh reported on 2026-08-08.
+    """
     suite_doc["metapackage"] = suite_doc.pop("metapackages")
-    with pytest.raises(ValueError, match="unknown key.*metapackage"):
+    with pytest.raises(ValueError,
+                       match=r"porter\.yaml: unknown key\(s\) 'metapackage'"):
         load(_manifest(tmp_path, suite_doc))
 
 

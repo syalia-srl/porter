@@ -119,8 +119,17 @@ def test_the_timer_carries_the_schedule_and_survives_a_powered_off_night():
 
 def test_a_timer_with_no_schedule_is_refused():
     """A `[Timer]` with no `OnCalendar=` loads, enables, and never fires. There
-    is no interval porter could pick that is not a guess about someone's job."""
-    with pytest.raises(ValueError, match="never"):
+    is no interval porter could pick that is not a guess about someone's job.
+
+    Matched on "declares no schedule" and not on "never". Both refusals in this
+    function end in the word: remove this branch and `""` falls through to
+    `_refuse_a_calendar_systemd_cannot_parse`, whose message is "...the timer
+    would install at rc=0 and never fire". `match="never"` was satisfied by
+    either, so the test passed with its subject deleted -- reported by
+    scripts/reverify-guards.sh 2026-08-08 as the only FAIL in 166 entries, and
+    it was this assertion and not the guard.
+    """
+    with pytest.raises(ValueError, match="declares no schedule"):
         timer("demo-job", "demo job", "")
 
 
