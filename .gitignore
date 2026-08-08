@@ -6,3 +6,10 @@ __pycache__/
 dist/
 build/
 *.deb
+
+# Bake output. `examples/baked-data/data/corpus.db` is built by the example's
+# own bake step and must never be committed: a corpus in git is a corpus that
+# stops matching the script that claims to produce it, and the provenance stamp
+# would read `-dirty` on every build from a clean checkout.
+examples/*/data/
+

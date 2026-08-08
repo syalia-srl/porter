@@ -25,6 +25,7 @@ import microcli as m
 import yaml
 
 from porter.assemble import assemble
+from porter.bake import bake
 from porter.deb import build_deb
 from porter.types import Component
 
@@ -61,7 +62,14 @@ def build(
     # put it there.
     ours = not stage_dir.exists()
     try:
-        staged = assemble(component, python, manifest_path.parent, stage_dir)
+        # Before the stage exists, and before 97 MB is vendored on top of data
+        # that may not have been rebuilt: bake runs the project's own ETL and
+        # refuses an artefact that is absent, too small, or hiding half its rows
+        # in an uncheckpointed SQLite WAL. Its stamp is what tells a client
+        # which build it is running.
+        baked = bake(component, manifest_path.parent)
+        staged = assemble(component, python, manifest_path.parent, stage_dir,
+                          stamp=baked.stamp)
         deb = build_deb(staged.stage, staged.control, Path(out),
                         conffiles=staged.conffiles, scripts=staged.scripts)
     finally:

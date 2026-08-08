@@ -37,6 +37,26 @@ class Python:
 
 
 @dataclass(frozen=True)
+class BakeArtifact:
+    """One thing a bake step must have produced, and how big it must be.
+
+    `min_bytes` is not optional and not defaulted, and that is the whole point
+    of the type existing rather than `artifacts` being a list of strings. An
+    empty SQLite database is a valid file: it exists, it opens, it answers
+    queries, and it has nothing in it. "the artifact is there" and "the
+    artifact is real" are different questions, and only the second one is worth
+    asking before a package ships to a client with no network.
+
+    Declared as `None` here rather than required by the constructor so a
+    manifest that omits it gets `bake`'s refusal, which says what is wrong,
+    instead of a `TypeError` naming a field the adopter never typed.
+    """
+
+    path: str
+    min_bytes: int | None = None
+
+
+@dataclass(frozen=True)
 class Component:
     """One installable unit: a package name, a payload, and how it is run.
 
@@ -59,7 +79,17 @@ class Component:
     # /usr/lib/<pkg>/ -- which is the unit's WorkingDirectory, hence the import
     # root. See assemble's module docstring.
     source_paths: list[str] = field(default_factory=list)
+    # Paths relative to `src_root`, staged under their own basename in
+    # /usr/share/<pkg>/ -- the FHS contract's home for baked data, models and
+    # static assets. Separate from `source_paths` because /usr/lib/<pkg> is the
+    # import root: a corpus staged there is on sys.path, and a `data/` entry
+    # holding a stray .py would be refused by a check meant for source.
+    data_paths: list[str] = field(default_factory=list)
     requirements: list[str] = field(default_factory=list)
+    # The `bake:` block. Commands run in src_root before anything is staged,
+    # and what they must have produced. See porter.bake.
+    bake_steps: list[str] = field(default_factory=list)
+    bake_artifacts: list[BakeArtifact] = field(default_factory=list)
     # The whole env template. `split()` divides it by owner; membership in
     # admin_keys is the only thing that decides which half a key lands in.
     defaults: dict[str, str] = field(default_factory=dict)
@@ -82,6 +112,7 @@ class Component:
         real one.
         """
         py = manifest.get("python", {})
+        bake = manifest.get("bake", {})
         return (
             cls(
                 name=manifest.get("name", manifest["package"]),
@@ -91,7 +122,16 @@ class Component:
                 module=manifest["exec"]["module"],
                 args=list(manifest["exec"].get("args", [])),
                 source_paths=list(manifest.get("source", [])),
+                data_paths=list(manifest.get("data", [])),
                 requirements=list(manifest.get("requirements", [])),
+                bake_steps=list(bake.get("steps", [])),
+                # `.get("min_bytes")` and not `["min_bytes"]`: an omitted
+                # minimum is a manifest mistake worth a sentence, not a
+                # KeyError whose whole message is the word it is missing.
+                bake_artifacts=[
+                    BakeArtifact(path=a["path"], min_bytes=a.get("min_bytes"))
+                    for a in bake.get("artifacts", [])
+                ],
                 defaults=dict(manifest.get("env", {})),
                 admin_keys=list(manifest.get("admin_keys", [])),
                 bin_name=manifest.get("bin_name"),

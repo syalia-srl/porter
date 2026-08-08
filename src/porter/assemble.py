@@ -326,8 +326,15 @@ exec {argv}
 
 
 def assemble(component: Component, python: Python,
-             src_root: Path, stage_root: Path) -> Staged:
-    """Stage `component` under `stage_root`. Returns what `build_deb` needs."""
+             src_root: Path, stage_root: Path, stamp: str | None = None) -> Staged:
+    """Stage `component` under `stage_root`. Returns what `build_deb` needs.
+
+    `stamp` is `porter.bake`'s provenance block, written to
+    `usr/share/<pkg>/VERSION` -- package-owned, replaced on upgrade, and inside
+    the top-level allowlist. bake cannot write it itself: the stage does not
+    exist when bake runs, and `assemble` refuses to build into one that is
+    already populated.
+    """
     # Resolved, and not merely wrapped in Path: `porter build`'s own --stage
     # default is the relative "build", and the import probe execs the staged
     # interpreter with `cwd=libdir`. The child chdir's before exec, so a
@@ -370,6 +377,27 @@ def assemble(component: Component, python: Python,
         else:
             shutil.copy2(src, dest)
 
+    # Baked data goes to /usr/share/<pkg>, which is the FHS contract's home for
+    # it, and NOT to /usr/lib/<pkg> with the source. That directory is the unit's
+    # WorkingDirectory and therefore the import root: a corpus staged there is on
+    # sys.path, where a `data/model.py` shadows the stdlib for the whole service.
+    sharedir = stage / "usr/share" / pkg
+    for entry in component.data_paths:
+        sharedir.mkdir(parents=True, exist_ok=True)
+        src, dest = src_root / entry, sharedir / Path(entry).name
+        if src.is_dir():
+            shutil.copytree(src, dest, symlinks=True)
+        else:
+            shutil.copy2(src, dest)
+
+    # Which build produced this package, readable on the client with `cat`. The
+    # package version does not answer that question: two builds of 1.0 from
+    # different corpora are indistinguishable, and the client is where the only
+    # copy of the evidence is.
+    if stamp is not None:
+        sharedir.mkdir(parents=True, exist_ok=True)
+        (sharedir / "VERSION").write_text(stamp)
+
     # The paths as they will be ON THE CLIENT, never the staging paths: an
     # ExecStart naming a build directory is the exact class of bug rule 1 is
     # about, and it works perfectly on the machine that produced it.
@@ -385,12 +413,13 @@ def assemble(component: Component, python: Python,
         # `EnvironmentFile=/etc/<pkg>/defaults` carries no `-`, so an absent
         # file is a start failure whose only trace is the unit's status.
         (etc / "defaults").write_text(defaults)
-        share = stage / "usr/share" / pkg
-        share.mkdir(parents=True)
+        # exist_ok: the data staging and the VERSION stamp above may already
+        # have created it, and both are legitimate for a service.
+        sharedir.mkdir(parents=True, exist_ok=True)
         # Under /usr/share and never /etc. env in the stage is refused by
         # deb.py's lint, and rightly: shipping it lets dpkg replace the admin's
         # secrets on the next upgrade.
-        (share / "env.example").write_text(env_example)
+        (sharedir / "env.example").write_text(env_example)
 
         exec_start = " ".join([installed_python, "-m", component.module, *component.args])
         units = stage / "usr/lib/systemd/system"

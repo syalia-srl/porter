@@ -16,6 +16,6 @@ so a Task 7 that defines its own `Component` here takes the suite red instead
 of quietly giving the gallery a second schema to drift from.
 """
 
-from porter.types import Component, Python
+from porter.types import BakeArtifact, Component, Python
 
-__all__ = ["Component", "Python"]
+__all__ = ["BakeArtifact", "Component", "Python"]

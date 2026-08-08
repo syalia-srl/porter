@@ -1,0 +1,74 @@
+# The gallery's baked-data entry: a service whose payload is a database that
+# does not exist until the bake stage builds it.
+#
+# This is the manifest an adopter copies when their package ships data rather
+# than only code -- a corpus, a search index, a rendered frontend, a model. The
+# shape it teaches is `bake:` + `data:`: build it in the source tree, prove it
+# is real, and stage it under /usr/share/<pkg>/ where the FHS contract puts
+# baked data.
+#
+# Why this example is not optional. leyes-cuba rebuilds its corpus before every
+# package and beaver runs SQLite in WAL mode, so rows committed without a
+# checkpoint live in `<db>-wal` and not in `<db>`. Packaging only `<db>` ships a
+# database that reads correctly on the build host -- the WAL is right there
+# beside it -- and is stale or blank at the client. That has already happened
+# once for real. `scripts/build_corpus.py` therefore ends with
+# `PRAGMA wal_checkpoint(TRUNCATE)`, and porter refuses the build if it did not.
+#
+# It then ends with `PRAGMA journal_mode=delete`, which is the half that is easy
+# to miss: a reader of a WAL-mode database creates `<db>-shm` beside it, and
+# /usr/share/<pkg>/ is root-owned while the service runs as a non-root user. The
+# first query would fail with `attempt to write a readonly database` on the
+# client and nowhere else. porter refuses that too.
+
+package: baked-data
+version: "1.0"
+description: porter's example service with a baked SQLite payload
+maintainer: porter <porter@example.com>
+architecture: amd64
+
+kind: service
+
+# Stage 1 of the pipeline. Commands run in this file's directory, in order,
+# under `bash -e -o pipefail` -- so a step written as `builder | tee log`
+# reports the builder's failure and not tee's success.
+bake:
+  steps:
+    - python3 scripts/build_corpus.py
+  # What the steps must have produced. `min_bytes` is required and may not be
+  # zero: an empty SQLite database exists, opens, and answers queries with
+  # nothing. The value is the size below which the corpus is known to be wrong,
+  # not a guess at how big it should be -- 2000 rows measure ~180 KB.
+  artifacts:
+    - path: data/corpus.db
+      min_bytes: 65536
+
+# Baked data, staged under its own basename in /usr/share/baked-data/. Kept out
+# of `source:` on purpose: /usr/lib/<pkg> is the unit's WorkingDirectory and
+# therefore the import root, and a corpus does not belong on sys.path.
+data:
+  - data/corpus.db
+
+source:
+  - src/app.py
+
+python:
+  version: "3.12"
+  package: bundled
+
+# None. The app is stdlib only -- sqlite3 and http.server -- which keeps this
+# example about the bake stage and not about wheels.
+requirements: []
+
+exec:
+  module: app
+  args: []
+
+# DB_PATH is the client path of the baked artifact, and it is config rather
+# than a constant in app.py for the ordinary reason: an operator who moves the
+# corpus onto another volume should not need a new package.
+env:
+  PORT: "9100"
+  DB_PATH: /usr/share/baked-data/corpus.db
+
+admin_keys: []
