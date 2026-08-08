@@ -151,8 +151,9 @@ clean tree. `find src tests -name __pycache__ -type d -exec rm -rf {} +`.
 
 ## Know-how
 
-*(Empty — porter is a scaffold. Write an entry when a procedure survives being
-done twice.)*
+| Doc | When to reach for it |
+|---|---|
+| `know-how/mutation-testing-a-guard.md` | You added or changed a guard and must show it bites; or you are reviewing someone else's mutation evidence; or you are cutting a release. Carries the four traps that have cost real time here. |
 
 ## State
 
