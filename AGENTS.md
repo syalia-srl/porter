@@ -104,7 +104,8 @@ Spanish-speaking is still an English tool.
 ## Running the tests
 
 ```bash
-PORTER_REQUIRE_UV=1 PORTER_REQUIRE_DOCKER=1 uv run --extra dev pytest
+PORTER_REQUIRE_UV=1 PORTER_REQUIRE_DOCKER=1 PORTER_REQUIRE_SYSTEMD=1 \
+  uv run --extra dev pytest
 ```
 
 **Always set `PORTER_REQUIRE_UV=1`.** Most of the suite needs `uv` on PATH to
@@ -118,6 +119,19 @@ is the first thing to wire into CI when CI exists.
 `docker`-marked tests are the only ones that *install* a package rather than
 merely build one, so a run that skips them has verified nothing about the
 client.
+
+**`PORTER_REQUIRE_SYSTEMD=1` is the third**, and the one added last.
+`systemd-analyze verify` is the only check that a directive in the emitted unit
+is one systemd actually *knows* — a misspelled key is not an error to systemd,
+it is a log line and a service that starts anyway with none of its config. Note
+it reports keys it does not recognise and never keys that are *missing*, so it
+does not subsume `test_unit_carries_the_hardening_and_restart_directives_...`;
+the two are orthogonal and both are needed (measured 2026-08-08: deleting
+`ProtectSystem=strict` leaves `verify` perfectly clean).
+
+**All three CI-armed.** They are in `.github/workflows/ci.yml`'s `env:` block.
+Adding a fourth such variable means adding it there too, or the gate can go
+green having skipped exactly the thing the variable exists to force.
 
 **Purge `__pycache__` after any edit-run-restore cycle** (mutation testing, a
 bisect, a quick experiment). CPython invalidates bytecode on source mtime *and
@@ -161,23 +175,41 @@ done twice.)*
   Control values are folded onto Debian continuation lines. 29 tests, each
   asserted against the built artefact. `__pycache__` is *not* treated as
   residue: a vendored interpreter ships 35 such directories.
-- **Task 3 done:** `src/porter/config.py` (`split`, `env_postinst`) and
+- **Task 3 done** (fix round 1 applied)**:** `src/porter/config.py` (`split`, `env_postinst`) and
   `src/porter/systemd.py` (`unit`), plus the gallery's first entry,
-  `examples/service-fastapi/`. 13 tests. The example's `porter.yaml` is the
+  `examples/service-fastapi/`. 16 tests. The postinst runs its `systemctl` block
+  only `if [ -d /run/systemd/system ]`, and then **without `|| true`** — that
+  directory is the only thing distinguishing "no systemd here, skip it" from
+  "systemd is real and `enable` failed", and the old blanket `|| true` reported
+  success for both. The second is a service that is simply gone after the next
+  reboot, with the install having exited 0.
+
+  The example's `porter.yaml` is the
   only place its package name, interpreter version, requirements, ExecStart and
   env template are written — the fixtures read it, so an example that stops
-  parsing or building takes the suite red. Three container tests run
+  parsing or building takes the suite red. Four container tests run
   `--network none` against a base image asserted to have **no** `python3`:
-  the service answers HTTP; an upgrade keeps `/etc/demo-app/env` at
+  the service answers HTTP under the unit's own `ExecStart`/`WorkingDirectory`;
+  a failing `systemctl enable` fails the install on a faked booted host and is
+  correctly ignored without one; an upgrade keeps `/etc/demo-app/env` at
   `600 root:root` while delivering both a corrected value and a brand-new
   package-owned key; and the same upgrade with the conffile locally edited is
   refused by dpkg (`end of file on stdin at conffile prompt`, rc=1, with
   `DEBIAN_FRONTEND=noninteractive` set) — the measurement rule 4 rests on,
   reproduced as a positive control.
 - **Next:** Task 4 — the nspawn gate, which is where the emitted unit is
-  finally *started* by systemd. Nothing so far has run one: the unit's shape is
-  checked with `systemd-analyze verify` and its ExecStart is exercised by hand
-  in a container.
+  finally *started* by systemd. Nothing so far has run one. What *is* exercised:
+  the container e2e reads `ExecStart=` and `WorkingDirectory=` out of the
+  **installed unit file** and runs the first from the second, with a positive
+  control showing the same ExecStart does not answer from `/` — so
+  `WorkingDirectory=` is proven to be what puts the app on `sys.path`. What is
+  **not** exercised, and is entirely Task 4's: systemd itself running that line
+  — `User=`/`Group=` resolving to the postinst's static user, `StateDirectory=`
+  creating `/var/lib/<pkg>` at `750 root:<pkg>`, `ProtectSystem=strict` not
+  breaking the service, `Restart=on-failure`, and systemd's root-then-drop read
+  of `EnvironmentFile`. Those are asserted only as text today (presence and
+  section by `test_unit_carries_the_hardening_...`, spelling by
+  `systemd-analyze verify`, which parses but does not run).
 
 The `porter.yaml` schema is defined by the example gallery: each example is a
 manifest that must parse and build, so a field with no example exercising it does
