@@ -39,6 +39,33 @@ NEVER_SHIPPED = ("env",)
 # package, and it would do so only once Task 3 wired the two together.
 JUNK = (".venv", ".git", ".env")
 
+# The only top-level directories a porter package may own. Everything else is
+# refused by name. The failure this catches is a stage rooted one directory too
+# high, which is how it goes wrong in practice: measured on zion 2026-08-08, a
+# stage carrying `home/apiad/secrets/id_rsa` built at rc=0 and dpkg-deb
+# --contents listed `./home/apiad/secrets/id_rsa` -- an ssh key packaged for an
+# airgapped client, with nothing anywhere reporting it.
+#
+# Why each is in:
+#   usr -- the payload. usr/lib/<pkg>/, usr/share/<pkg>/, usr/lib/systemd/system/.
+#   etc -- rule 4's shipped half, /etc/<pkg>/defaults, as a conffile.
+#   opt -- FHS's location for add-on software distributed outside the distro,
+#          which is exactly what a vendored interpreter plus app tree is.
+#   lib -- Debian's pre-usrmerge unit and udev paths (/lib/systemd/system,
+#          /lib/udev/rules.d). Ubuntu 22.04 is the build floor and is usrmerged,
+#          but the client's dpkg resolves the compat symlink, so refusing these
+#          would refuse a correct package for a cosmetic reason.
+#   var -- for the parts of /var that are not the client's. var/lib and var/log
+#          stay refused beneath it, by CLIENT_OWNED.
+#
+# Why /srv is NOT here, against the set the review suggested: FHS defines /srv
+# as "data for services provided by this system" -- the site administrator's,
+# which is the same argument that refuses /var/lib. A package shipping into /srv
+# claims the admin's data directory, and no porter example needs it. bin/ and
+# sbin/ are out for the reason usr/bin is in: rule 3 bans console scripts, and
+# on a usrmerged client the top-level pair are symlinks to usr/ anyway.
+ALLOWED_TOP_LEVEL = ("usr", "etc", "opt", "lib", "var")
+
 
 def _entries(root: Path):
     """Every entry under `root`, without following symlinks.
@@ -59,13 +86,43 @@ def _lint(stage: Path, conffiles: Sequence[str] = ()) -> None:
     Runs before anything is written, so a refusal leaves no half-built
     artefact behind.
     """
+    # DEBIAN/ is porter's to construct, out of `control`, `conffiles=` and
+    # `scripts=`. Refused rather than removed: deleting it gives the same
+    # protection against a stale member leaking into the package, but a caller
+    # who staged `triggers` or `shlibs` -- real control members with no
+    # build_deb parameter -- then gets a build that succeeds *without* them, at
+    # rc=0, saying nothing. A silent drop is the failure class this module
+    # exists to stop. Checked first so it beats the top-level allowlist below,
+    # which would otherwise refuse DEBIAN/ with the less useful message.
+    debian = stage / "DEBIAN"
+    if debian.exists() or debian.is_symlink():
+        raise ValueError(
+            f"stage carries a DEBIAN/ directory: {debian}. DEBIAN/ is porter's to "
+            "build -- pass its contents as control fields, conffiles= and scripts="
+        )
+    # A porter package owns a declared set of paths; an unbounded top level
+    # contradicts that outright. This is also the check that catches a stage
+    # rooted at the wrong directory, and it subsumes a family of one-off
+    # refusals that would each have to be written by hand.
+    for entry in sorted(stage.iterdir()):
+        if entry.name not in ALLOWED_TOP_LEVEL:
+            raise ValueError(
+                f"stage carries a top-level path porter does not own: /{entry.name} "
+                f"({entry}). A package may own only "
+                f"{', '.join('/' + d for d in ALLOWED_TOP_LEVEL)}"
+            )
     for rel in CLIENT_OWNED:
         p = stage / rel
         if p.exists() and any(p.rglob("*")):
             raise ValueError(f"stage writes to client-owned path /{rel}: {p}")
     for etc in (stage / "etc").glob("*"):
         for name in NEVER_SHIPPED:
-            if (etc / name).exists():
+            # `or is_symlink()`: exists() follows the link, so a *dangling*
+            # env symlink reported False and shipped. Verified 2026-08-08 --
+            # `etc/<pkg>/env -> nowhere-at-all` built at rc=0 and dpkg-deb
+            # --contents listed it, declared as a conffile or not.
+            p = etc / name
+            if p.exists() or p.is_symlink():
                 raise ValueError(
                     f"/etc/{etc.name}/{name} is admin-owned and never shipped in the .deb"
                 )
@@ -74,10 +131,16 @@ def _lint(stage: Path, conffiles: Sequence[str] = ()) -> None:
     # ordinary payload, which is the same harm one directory over: dpkg
     # overwrites an edited /etc/<pkg>/defaults on every upgrade, with no
     # .dpkg-dist, no prompt and no record, because it was never registered.
+    #
+    # A symlink counts as a file here. dpkg only warns that a symlinked
+    # conffile "is not a plain file" and builds anyway (rc=0, verified
+    # 2026-08-08), so `etc/<pkg>/extra.conf -> ../../usr/lib/<pkg>/defaults`
+    # -- relative and inside the stage, so the symlink guard below passes it --
+    # shipped an undeclared config path under /etc with nothing to show for it.
     declared = {"/" + str(c).lstrip("/") for c in conffiles}
     for p in _entries(stage / "etc"):
-        if p.is_dir() or p.is_symlink():
-            continue
+        if p.is_dir() and not p.is_symlink():
+            continue  # a real directory ships as a directory; its contents are the config
         shipped = "/" + str(p.relative_to(stage))
         if shipped not in declared:
             raise ValueError(
@@ -139,9 +202,9 @@ def build_deb(stage: Path, control: dict[str, str], out_dir: Path,
     # conffiles= still ships the previous call's, at rc=0 -- and the previous
     # call does not even have to have succeeded, because cleanup used to sit
     # after the raise. That is the silent success this module exists to stop.
+    # Freshness is guaranteed by _lint refusing a pre-existing DEBIAN/ outright,
+    # so this mkdir is bare: nothing here may quietly overwrite a caller's tree.
     debian = stage / "DEBIAN"
-    if debian.exists():
-        shutil.rmtree(debian)
     debian.mkdir()
     try:
         (debian / "control").write_text(

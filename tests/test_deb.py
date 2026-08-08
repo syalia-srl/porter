@@ -228,31 +228,37 @@ def test_a_failed_build_leaves_no_scaffolding_in_the_stage(tmp_path):
 
 
 def test_a_stale_debian_directory_does_not_leak_into_the_next_package(tmp_path):
-    """DEBIAN/ is built fresh, so no member survives a call.
+    """DEBIAN/ is porter's to build, so a caller-staged one is refused.
 
-    The failure this pins is silent success: a stage carrying scaffolding from
-    an earlier build -- left there by a failed one, or pre-staged by a caller
-    -- gets it packaged by a call that passed neither `scripts=` nor
-    `conffiles=`, and returns a .deb at rc=0 shipping a postinst nobody wrote
-    and a conffiles nobody declared.
+    Two failures, one guard. The first is a leak: a stage carrying scaffolding
+    from an earlier build -- left there by a failed one, or pre-staged by a
+    caller -- used to get it packaged by a call that passed neither `scripts=`
+    nor `conffiles=`, returning a .deb at rc=0 shipping a postinst nobody wrote.
+
+    The second is what deleting the directory instead traded that for: this
+    stage also carries `triggers`, a real Debian control member with no
+    build_deb parameter (as are `shlibs`, `md5sums`, `templates`). Removing
+    DEBIAN/ silently built a package *without* it at rc=0 -- the caller's
+    trigger, gone, unreported. Refusing gives byte-for-byte the same protection
+    against the leak and names the drop instead of performing it.
 
     The stale `conffiles` names a path that IS in the payload on purpose:
-    dpkg-deb rejects a conffile missing from the package (rc=2), so pointing it
-    at a ghost would make this test pass through dpkg's error rather than
-    through the leak. Reusing DEBIAN/ has to be caught while the build still
-    succeeds -- that is the whole failure mode."""
+    dpkg-deb rejects a conffile missing from the package (rc=2), so under the
+    delete-instead-of-raise mutation this stage still builds at rc=0, which is
+    what makes the silent drop observable rather than masked by dpkg's error."""
     stage = _stage(tmp_path, etc=False)
     stale = stage / "DEBIAN"
     stale.mkdir()
     (stale / "postinst").write_text("#!/bin/sh\necho STALE\n")
     (stale / "postinst").chmod(0o755)
     (stale / "conffiles").write_text("/usr/lib/demo-app/app.txt\n")
+    (stale / "triggers").write_text("interest-noawait /usr/lib/demo-app\n")
 
-    deb = build_deb(stage, CONTROL, tmp_path)
+    with pytest.raises(ValueError, match="DEBIAN/ is porter's to build"):
+        build_deb(stage, CONTROL, tmp_path)
 
-    members = {n.removeprefix("./") for n in _control_tar(deb).getnames()}
-    assert "postinst" not in members, f"stale scaffolding shipped: {members}"
-    assert "conffiles" not in members, f"stale scaffolding shipped: {members}"
+    assert not (tmp_path / "demo-app_1.0_amd64.deb").exists()
+    assert (stale / "triggers").exists(), "the caller's control member was deleted"
 
 
 def test_refuses_a_stage_carrying_an_absolute_symlink(tmp_path):
@@ -299,6 +305,100 @@ def test_refuses_a_file_under_etc_that_is_not_declared_a_conffile(tmp_path):
     stage = _stage(tmp_path)
     with pytest.raises(ValueError, match="not declared a conffile"):
         build_deb(stage, CONTROL, tmp_path)
+
+
+@pytest.mark.parametrize("top", ["home", "tmp", "srv", "boot"])
+def test_refuses_a_top_level_path_porter_does_not_own(tmp_path, top):
+    """porter's thesis is that a package owns exactly a declared set of paths,
+    so an unbounded top level contradicts the whole tool.
+
+    Measured on zion 2026-08-08: a stage carrying `home/apiad/secrets/id_rsa`
+    built at rc=0 and dpkg-deb --contents listed `./home/apiad/secrets/id_rsa`
+    -- an ssh key packaged for an airgapped client with nothing reporting it.
+    This is also the check that catches a stage rooted one directory too high,
+    which is how it goes wrong in practice.
+
+    `srv` is in this list deliberately, against the set the review suggested:
+    FHS defines /srv as data for services provided by *this system*, i.e. the
+    site administrator's, which is the same argument that refuses /var/lib."""
+    stage = _stage(tmp_path)
+    (stage / top / "apiad/secrets").mkdir(parents=True)
+    (stage / top / "apiad/secrets/id_rsa").write_text("PRIVATE KEY\n")
+    with pytest.raises(ValueError, match=f"does not own: /{top}"):
+        build_deb(stage, CONTROL, tmp_path, conffiles=CONFFILES)
+    assert not (tmp_path / "demo-app_1.0_amd64.deb").exists()
+
+
+def test_accepts_the_top_level_shapes_a_real_package_ships(tmp_path):
+    """The positive control for the allowlist above.
+
+    An allowlist written one entry too narrow refuses a correct package, and
+    does it at the moment a later task first stages the real shape rather than
+    here -- the `__pycache__` mistake's structure exactly. So this stages every
+    shape porter has committed to supporting: the two payload roots, a systemd
+    unit at its usrmerged path and at Debian's pre-merge one, an /opt tree, a
+    conffile, a /var path that is not the client's, and a symlinked *directory*
+    (a python-build-standalone tree is full of them, and `vendor()` copies with
+    symlinks=True). Every one must reach the payload."""
+    stage = tmp_path / "stage"
+    for rel, body in [
+        ("usr/lib/demo-app/app.txt", "payload\n"),
+        ("usr/share/demo-app/logo.svg", "<svg/>\n"),
+        ("usr/lib/systemd/system/demo-app.service", "[Unit]\n"),
+        ("opt/demo-app/blob.bin", "\x00\n"),
+        ("lib/udev/rules.d/99-demo-app.rules", "# rules\n"),
+        ("var/cache/demo-app/.keep", ""),
+        ("etc/demo-app/defaults", "PORT=9000\n"),
+    ]:
+        (stage / rel).parent.mkdir(parents=True, exist_ok=True)
+        (stage / rel).write_text(body)
+    (stage / "usr/lib/demo-app/versions/1.0").mkdir(parents=True)
+    (stage / "usr/lib/demo-app/current").symlink_to("versions/1.0")
+
+    contents = _contents(build_deb(stage, CONTROL, tmp_path, conffiles=CONFFILES))
+    for expected in ["./usr/lib/demo-app/app.txt", "./usr/share/demo-app/logo.svg",
+                     "./usr/lib/systemd/system/demo-app.service", "./opt/demo-app/blob.bin",
+                     "./lib/udev/rules.d/99-demo-app.rules", "./var/cache/demo-app/.keep",
+                     "./etc/demo-app/defaults",
+                     "./usr/lib/demo-app/current -> versions/1.0"]:
+        assert expected in contents, f"{expected} did not reach the payload:\n{contents}"
+
+
+def test_refuses_a_symlink_under_etc_that_is_not_declared_a_conffile(tmp_path):
+    """The conffile lint walked files, so a symlink under /etc was neither
+    refused nor required to be declared -- the same family as the file case it
+    sits beside.
+
+    Verified on dpkg 1.23.7, 2026-08-08: `etc/demo-app/extra.conf -> defaults`
+    is relative and lands inside the stage, so the symlink guard passes it, and
+    dpkg-deb built at rc=0 and shipped it. Undeclared, dpkg replaces the admin's
+    edited target on every upgrade exactly as it would a plain file. Declared,
+    dpkg merely warns that a conffile `is not a plain file` and proceeds -- so
+    nothing downstream was ever going to catch this either."""
+    stage = _stage(tmp_path)
+    (stage / "etc/demo-app/extra.conf").symlink_to("defaults")
+    with pytest.raises(ValueError, match="not declared a conffile"):
+        build_deb(stage, CONTROL, tmp_path, conffiles=CONFFILES)
+
+
+def test_refuses_an_env_symlink_even_when_it_is_declared_a_conffile(tmp_path):
+    """Rule 4's admin-owned half, refused whether it is a file or a link.
+
+    `Path.exists()` follows the link, so a *dangling* env symlink reported
+    False and sailed through. It ships regardless: on 2026-08-08
+    `etc/demo-app/env -> nowhere-at-all` built at rc=0 and dpkg-deb --contents
+    listed it, both declared as a conffile and not.
+
+    Declared here on purpose. It makes this the one test that can only be
+    satisfied by the NEVER_SHIPPED check -- the conffile lint has nothing to
+    say about a path the caller declared -- so removing that check makes the
+    build *succeed* and ship /etc/demo-app/env, which is the original symptom
+    rather than a differently-worded refusal."""
+    stage = _stage(tmp_path)
+    (stage / "etc/demo-app/env").symlink_to("nowhere-at-all")
+    with pytest.raises(ValueError, match="never shipped"):
+        build_deb(stage, CONTROL, tmp_path,
+                  conffiles=[*CONFFILES, "/etc/demo-app/env"])
 
 
 def test_a_multi_line_value_is_folded_not_injected(tmp_path):
