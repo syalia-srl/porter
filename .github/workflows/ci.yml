@@ -6,14 +6,19 @@ on:
   pull_request:
   workflow_dispatch:
 
-# A green run here must mean the suite actually ran. Both PORTER_REQUIRE_* gates
-# are ON: without them, missing `uv` or a missing docker daemon turns most of the
-# suite into skips and pytest still exits 0 -- a green badge over a suite that
-# tested almost nothing. That is the exact failure porter exists to prevent, so
-# it is not tolerable in porter's own CI.
+# A green run here must mean the suite actually ran. All three PORTER_REQUIRE_*
+# gates are ON: without them, a missing `uv`, a missing docker daemon or a
+# missing `systemd-analyze` turns much of the suite into skips and pytest still
+# exits 0 -- a green badge over a suite that tested almost nothing. That is the
+# exact failure porter exists to prevent, so it is not tolerable in porter's own
+# CI. PORTER_REQUIRE_SYSTEMD is the newest of the three and the easiest to lose:
+# it guards the only check that every directive in the emitted unit is one
+# systemd recognises, and a slimmer runner image is exactly where the binary
+# would quietly not be there.
 env:
   PORTER_REQUIRE_UV: "1"
   PORTER_REQUIRE_DOCKER: "1"
+  PORTER_REQUIRE_SYSTEMD: "1"
 
 jobs:
   tests:
@@ -34,6 +39,10 @@ jobs:
         run: |
           set -euo pipefail
           command -v dpkg-deb >/dev/null || { echo "dpkg-deb missing"; exit 1; }
+          # PORTER_REQUIRE_SYSTEMD=1 makes its absence a test failure anyway;
+          # naming it here turns that into one legible line instead of a
+          # failure discovered midway through the suite.
+          command -v systemd-analyze >/dev/null || { echo "systemd-analyze missing"; exit 1; }
           docker version --format '{{.Server.Version}}'
           df -h / | tail -1
 

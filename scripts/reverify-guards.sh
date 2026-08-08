@@ -26,7 +26,13 @@
 set -uo pipefail
 cd "$(dirname "$0")/.." || exit 2
 purge() { find src tests -name __pycache__ -type d -exec rm -rf {} + 2>/dev/null; true; }
-run()   { PORTER_REQUIRE_UV=1 uv run --extra dev pytest -q "$@" >/tmp/rv.log 2>&1; echo $?; }
+# All three gates armed. A skipped test is green, and a green run here would be
+# read as "the guard still bites" when in fact nothing ran -- the same silence
+# this script exists to detect, one level up. On a host missing uv, docker or
+# systemd-analyze the baseline below goes red and says so, which is correct: this
+# is a release gate, not a contributor's first run.
+run()   { PORTER_REQUIRE_UV=1 PORTER_REQUIRE_DOCKER=1 PORTER_REQUIRE_SYSTEMD=1 \
+            uv run --extra dev pytest -q "$@" >/tmp/rv.log 2>&1; echo $?; }
 
 fail=0
 check() {  # check <label> <file> <python-replace-expr> <expect-tests>
@@ -66,6 +72,29 @@ check "T2 env never ships" src/porter/deb.py \
   's = s.replace("if p.exists() or p.is_symlink():", "if False:")' tests/test_deb.py
 check "T2 undeclared /etc conffile" src/porter/deb.py \
   's = s.replace("if shipped not in declared:", "if False:")' tests/test_deb.py
+
+echo "════ Task 3 — the unit, and the postinst's systemctl block ════"
+# The container e2e reads ExecStart= and WorkingDirectory= out of the INSTALLED
+# unit and runs the first from the second. Break the second and it must go red;
+# the pre-fix test, which hand-copied the command line with an extra --app-dir,
+# stayed green through exactly this mutation.
+check "T3 WorkingDirectory is the directory the service runs in" src/porter/systemd.py \
+  's = s.replace("WorkingDirectory={workdir}", "WorkingDirectory=/")' tests/test_service_e2e.py
+# The two halves of the postinst's systemd discrimination, one mutation each.
+check "T3 a failed systemctl enable on a booted host is fatal" src/porter/config.py \
+  's = s.replace("systemctl enable {pkg}.service", "systemctl enable {pkg}.service || true")' \
+  tests/test_service_e2e.py
+check "T3 a host with no booted systemd skips systemctl entirely" src/porter/config.py \
+  's = s.replace("if [ -d /run/systemd/system ]", "if [ -d / ]")' tests/test_service_e2e.py
+# Presence of the hardening directives, which systemd-analyze cannot see: it
+# reports keys it does not recognise, never keys that are absent.
+check "T3 the unit carries its hardening directives" src/porter/systemd.py \
+  's = s.replace("ProtectSystem=strict\n", "")' tests/test_config.py
+# And the arming variable itself: disarmed, a missing systemd-analyze goes back
+# to skipping silently and taking seven directives with it.
+check "T3 PORTER_REQUIRE_SYSTEMD arms the systemd-analyze skip" tests/conftest.py \
+  's = s.replace("PORTER_REQUIRE_SYSTEMD\", \"\"", "PORTER_REQUIRE_SYSTEMD_OFF\", \"\"")' \
+  tests/test_config.py
 
 echo
 echo "════ control: suite green again after every restore ════"
