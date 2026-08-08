@@ -211,8 +211,13 @@ check "T4 stage_root is resolved before anything execs out of it" src/porter/ass
 # every run: the command succeeds exactly once and then reports a refusal about
 # a directory the user never created, and a failure reports a different error
 # the second time than the first.
+# Anchored on `_build_one`'"'"'s trailing `return deb`: `if ours:` is the same
+# idiom in three functions now (component, metapackage, desktop launcher), and an
+# unanchored pattern rewrites all three -- Trap 6, a verdict about something
+# other than the guard named.
 check "T4 the CLI removes the stage it created, pass or fail" src/porter/cli.py \
-  's = s.replace("if ours:", "if False:")' tests/test_cli.py
+  's = s.replace("        if ours:\n            shutil.rmtree(stage_dir, ignore_errors=True)\n    return deb", "        if False:\n            shutil.rmtree(stage_dir, ignore_errors=True)\n    return deb")' \
+  tests/test_cli.py
 # microcli registers an optional with help=argparse.SUPPRESS when its
 # Annotated[...] help is empty. Emptied, --out and --stage vanish from --help
 # entirely while still working: functional, undiscoverable.
@@ -454,7 +459,8 @@ echo "════ Task 11 — the CLI's multi-component loop ════"
 # manifest still declares them, the ordering in the one built package still
 # names them, and the client installs a gateway whose dependencies do not exist.
 check "T11 porter build emits one package per component" src/porter/cli.py \
-  's = s.replace("for c, py in pairs]", "for c, py in pairs[:1]]")' tests/test_ordering.py
+  's = s.replace("for c, py in parsed.components]", "for c, py in parsed.components[:1]]")' \
+  tests/test_ordering.py
 echo "════ Task 11 — oneshot: the three things that made it a refusal ════"
 # Each of these is one third of the reason Task 4 refused `kind: oneshot`
 # outright, and each fails silently on its own.
@@ -567,6 +573,225 @@ check "REV a oneshot with no schedule is refused BEFORE staging (TIMING -- see T
   src/porter/assemble.py \
   's = s.replace("    if component.kind == \"oneshot\" and not component.schedule:", "    if False:")' \
   tests/test_oneshot.py
+
+echo "════ Task 5 — the flat apt repo, the USB tree and the upgrade path ════"
+# Several of these mutate a line of INSTALL_SH rather than a branch. That is not
+# Trap 2: INSTALL_SH is not a constant the code reads and re-derives, it IS the
+# artefact shipped to the client, and changing a line of it changes what runs
+# there. Each entry is scoped to tests/test_repo.py.
+check "T5 an empty repo directory is refused BEFORE anything is written" \
+  src/porter/repo.py \
+  's = s.replace("    if not debs:", "    if False:")' tests/test_repo.py
+# Unchecked, a failure from dpkg-deb contributes an EMPTY stanza: the index
+# still writes at rc=0, carrying Filename/Size/SHA256 for a package with no name.
+check "T5 the rc of dpkg-deb --field is read directly" src/porter/repo.py \
+  's = s.replace("        if proc.returncode != 0:\n            raise RuntimeError(\n                f\"dpkg-deb", "        if False:\n            raise RuntimeError(\n                f\"dpkg-deb")' \
+  tests/test_repo.py
+# TRAP 4 APPLIES, and what this buys is TIMING plus a legible message. Every
+# name it refuses is also absent from the index, so the membership check below
+# still catches it -- after the .debs are copied and the index written, which
+# for a real payload is gigabytes, and reporting "not in the index" for what is
+# actually a malformed name. The test asserts nothing was created.
+check "T5 an app name that is not a Debian package name is refused (TIMING -- see Trap 4)" \
+  src/porter/repo.py \
+  's = s.replace("    if not PACKAGE_NAME.match(app):", "    if False:")' \
+  tests/test_repo.py
+# install.sh names exactly ONE package. Built for an app whose .deb is not on
+# the stick, the tree copies fine, boots fine, and tells the client `Unable to
+# locate package <app>` -- on a machine with no network to fix it from.
+check "T5 the app must appear in the index of its own USB tree" src/porter/repo.py \
+  's = s.replace("    if not re.search(rf\"^Package:", "    if False and re.search(rf\"^Package:")' \
+  tests/test_repo.py
+# deb.py's lesson, one module over. No *input* can break the shipped template
+# (the app name is validated first), so the test injects a broken INSTALL_SH by
+# monkeypatch -- without that this branch could never fire and would be worth
+# less than nothing. Mutating it here therefore also checks that test.
+check "T5 the generated install.sh must parse" src/porter/repo.py \
+  's = s.replace("\n    if proc.returncode != 0:\n        raise RuntimeError(f\"generated", "\n    if False:\n        raise RuntimeError(f\"generated")' \
+  tests/test_repo.py
+# Our sources entry names a path on the USB stick. Left behind, every later
+# `apt-get update` on that client exits 100 on a repository that was unplugged
+# weeks ago -- porter breaking apt for good, on a machine nobody can ssh into.
+check "T5 the apt sources entry is removed on the way out" src/porter/repo.py \
+  's = s.replace("rm -f \"$LIST\"", "true")' tests/test_repo.py
+# The re-exec must not eat the caller's argv. Parsing the flags before lifting
+# to root -- the obvious order -- consumes them all, so the deployer who asked
+# for `--version 1.0` silently gets 2.0, at rc=0.
+check "T5 the sudo re-exec keeps the caller's argv" src/porter/repo.py \
+  's = s.replace("exec sudo -n -E bash \"$0\" \"$@\"", "exec sudo -n -E bash \"$0\"")' \
+  tests/test_repo.py
+# A client's stale `file:` source (a previous stick, long gone) makes an
+# unscoped `apt-get update` exit 100, taking the offline install down with it.
+# An unreachable *mirror* does not: apt prints a warning and exits 0 (measured),
+# which is why the test's control uses the file: form.
+check "T5 apt-get update is scoped to our own list file" src/porter/repo.py \
+  's = s.replace("Dir::Etc::sourceparts=\"-\"", "Dir::Etc::sourceparts=\"sources.list.d\"")' \
+  tests/test_repo.py
+
+echo
+echo "════ Task 7 — the manifest validator, and the metapackage ════"
+# `_refuse_unknown_keys` is ONE guard with FIVE call sites, so it gets six
+# entries: one for the helper and one per site. Mutating the helper alone would
+# leave the wiring unverified -- a deleted call for `exec:` is invisible to a
+# mutation of the branch inside it -- and mutating only the sites would leave
+# the branch unverified. Each site is disabled by widening its allowlist to
+# whatever the manifest happens to carry, which is a real behaviour change and
+# not Trap 2's `() or (...)`.
+check "T7 unknown keys are refused at all (the helper)" src/porter/spec.py \
+  's = s.replace("    if unknown:", "    if False:")' tests/test_spec.py
+# `metapackage:` for `metapackages:` -- every component builds, no role does,
+# and the sysadmin's one-name runbook names a package not on the USB.
+check "T7 an unknown TOP-LEVEL key is refused" src/porter/spec.py \
+  's = s.replace("_refuse_unknown_keys(str(path), doc, TOP_LEVEL_KEYS)", "_refuse_unknown_keys(str(path), doc, TOP_LEVEL_KEYS | frozenset(doc))")' \
+  tests/test_spec.py
+# The expensive one: `admin_key:` leaves the key in `env:`, so split() files the
+# client's secret into /etc/<pkg>/defaults -- package-owned, a conffile, shipped
+# inside the .deb and replaced on every upgrade.
+check "T7 an unknown key in a COMPONENT entry is refused" src/porter/spec.py \
+  's = s.replace("_refuse_unknown_keys(label, entry, COMPONENT_KEYS)", "_refuse_unknown_keys(label, entry, COMPONENT_KEYS | frozenset(entry))")' \
+  tests/test_spec.py
+# `verson:` silently falls back to the default interpreter, so the .deb ships a
+# Python one release below what the payload was written against.
+check "T7 an unknown key in the python: block is refused" src/porter/spec.py \
+  's = s.replace("entry.get(\"python\", {}), PYTHON_KEYS)", "entry.get(\"python\", {}), PYTHON_KEYS | frozenset(entry.get(\"python\", {})))")' \
+  tests/test_spec.py
+# `arg:` drops the module'"'"'s own arguments: `-m uvicorn app:app --port ...`
+# becomes a bare `-m uvicorn`, which exits on its usage message and restarts.
+check "T7 an unknown key in the exec: block is refused" src/porter/spec.py \
+  's = s.replace("entry.get(\"exec\", {}), EXEC_KEYS)", "entry.get(\"exec\", {}), EXEC_KEYS | frozenset(entry.get(\"exec\", {})))")' \
+  tests/test_spec.py
+# `depends_on:` for `depends:` builds a role with an EMPTY Depends: apt installs
+# it, reports success, and delivers not one component.
+check "T7 an unknown key in a METAPACKAGE is refused" src/porter/spec.py \
+  's = s.replace("_refuse_unknown_keys(label, entry, METAPACKAGE_KEYS)", "_refuse_unknown_keys(label, entry, METAPACKAGE_KEYS | frozenset(entry))")' \
+  tests/test_spec.py
+# INCIDENTAL, and labelled so. Without these the manifest still fails -- as a
+# bare KeyError from `from_manifest` whose entire message is the word the
+# adopter did not type, with no path and no component name. The guard buys a
+# legible refusal, not a caught silent success.
+check "T7 a component missing a required key (incidental -- KeyError without it)" \
+  src/porter/spec.py \
+  's = s.replace("_refuse_missing_keys(label, entry, REQUIRED_COMPONENT_KEYS)", "_refuse_missing_keys(label, entry, ())")' \
+  tests/test_spec.py
+check "T7 a metapackage missing a required key (incidental -- KeyError without it)" \
+  src/porter/spec.py \
+  's = s.replace("_refuse_missing_keys(label, entry, REQUIRED_METAPACKAGE_KEYS)", "_refuse_missing_keys(label, entry, ())")' \
+  tests/test_spec.py
+# The headline refusal. dpkg-deb resolves nothing, so a one-character typo in
+# `depends:` builds at rc=0 and the USB looks complete; `apt install <role>`
+# then reports unmet dependencies on the client, with no network to fix it.
+check "T7 a role naming a package the manifest does not build is refused" \
+  src/porter/spec.py \
+  's = s.replace("            if name not in built:", "            if False:")' \
+  tests/test_spec.py
+check "T7 a role that depends on nothing is refused" src/porter/spec.py \
+  's = s.replace("        if not meta.depends:", "        if False:")' \
+  tests/test_spec.py
+# build_deb names the artefact `<package>_<version>_<arch>.deb`, so two packages
+# with one name are one file: the second overwrites the first, both at rc=0, and
+# the USB carries three packages where the manifest declared four.
+check "T7 two packages sharing one name are refused" src/porter/spec.py \
+  's = s.replace("    if duplicates:", "    if False:")' tests/test_spec.py
+# The metapackage's stage. build_deb'"'"'s lint refuses top-level paths porter does
+# not own, and `usr` is one porter DOES own -- so a leftover component tree here
+# is packaged into the role at rc=0, turning a 20 KB metapackage into a 91 MB
+# one that owns another package'"'"'s /usr/lib and conflicts with it on the client.
+check "T7 a metapackage refuses a non-empty stage" src/porter/cli.py \
+  's = s.replace("    if stage_dir.exists() and any(stage_dir.iterdir()):", "    if False:")' \
+  tests/test_examples.py
+
+echo "════ Task 8 — derived Depends and the desktop split ════"
+# Rule 11. Every refusal in depends.py exists because the obvious implementation
+# returns a SHORTER LIST instead: the build is green, the lint passes, dpkg is
+# satisfied, and the binary dies at its first exec on a client with no network.
+# So each mutation below must reproduce the short list, not merely an exception.
+#
+# `objdump -p` exits non-zero and prints nothing on an object it cannot parse.
+# Restored to `if False`, a truncated or corrupt payload derives NO dependencies
+# at all and the package ships with an empty Depends:.
+check "T8 an object objdump cannot read is not a dependency-free one" \
+  src/porter/depends.py \
+  's = s.replace("    if proc.returncode != 0:\n        raise RuntimeError(\n            f\"objdump could not read", "    if False:\n        raise RuntimeError(\n            f\"objdump could not read")' \
+  tests/test_depends.py 4
+# The silent-drop shape, written out in full: skip what ldconfig cannot resolve
+# and return the rest. That is the ORIGINAL bug -- a Depends: short by exactly
+# the library the build host does not have, which is the one the client will not
+# have either. Two lines because reproducing the symptom needs both halves.
+check "T8 a soname the build host cannot resolve is refused" src/porter/depends.py \
+  's = s.replace("    if missing:", "    sonames = [so for so in sonames if so in cache]\n    if False:")' \
+  tests/test_depends.py 4
+# A library hand-installed under /usr/local resolves perfectly here and maps to
+# no package at all. Removed, `packages_owning` returns the other entries and
+# says nothing about the one apt cannot deliver.
+check "T8 a library no package owns is refused" src/porter/depends.py \
+  's = s.replace("    if unowned:", "    if False:")' tests/test_depends.py
+# The vendored interpreter ships libpython3.12.so.1.0 and links it as
+# `$ORIGIN/../lib/libpython3.12.so.1.0` -- a PATH, not a bare soname. Without
+# the basename comparison the tree'"'"'s own library is read as a system
+# dependency, is unresolvable, and every porter package fails to build.
+check "T8 a library the payload ships itself is not a system dependency" \
+  src/porter/depends.py \
+  's = s.replace("    external = sorted(so for so in needed if PurePosixPath(so).name not in own)", "    external = sorted(needed)")' \
+  tests/test_depends.py
+# Rule 11 for the core package, and the reason `libcrypt1` is in it: nothing in
+# any manifest names it, it arrives through the single dynamically-linked
+# extension in the vendored interpreter, and a hand-written list would not have
+# it. Scoped to one nodeid -- the fixture builds two real .debs.
+check "T8 the core package derives Depends from what it stages" \
+  src/porter/assemble.py \
+  's = s.replace("    depends = derive_depends(stage)", "    depends = []")' \
+  "tests/test_desktop_e2e.py::test_the_core_package_declares_the_dependencies_it_derived"
+# Rule 12. A desktop dependency in the core package cannot be satisfied on an
+# airgapped headless client -- apt has no network and the GUI libraries are not
+# installed -- so the server install fails outright, at the client.
+check "T8 a desktop dependency in the core package is refused" src/porter/desktop.py \
+  's = s.replace("    if leaked:", "    if False:")' tests/test_desktop.py
+# THE launcher bug, and the reason those tests RUN the script instead of
+# grepping it. `command -v X && BROWSER=X && break` is an AND-list whose failure
+# is the last command of the loop body, so under `set -e` the launcher exits 1
+# the moment the first candidate is absent -- every client without Chrome, with
+# no window and no message. The broken form contains every substring the working
+# one does, so no text assertion can tell them apart.
+check "T8 the launcher survives a browser candidate being absent" src/porter/desktop.py \
+  's = s.replace("  if command -v \"$candidate\" >/dev/null 2>&1; then\n    BROWSER=\"$candidate\"\n    break\n  fi", "  command -v \"$candidate\" >/dev/null 2>&1 && BROWSER=\"$candidate\" && break")' \
+  tests/test_desktop.py 5
+# A click right after login arrives while systemd is still starting the unit.
+# Without the wait the window opens on connection-refused, which reads as a
+# broken install rather than a slow one.
+check "T8 the launcher waits for the service before opening" src/porter/desktop.py \
+  's = s.replace("  if curl -fsS -o /dev/null \"$HEALTH\"; then\n    break\n  fi", "  break")' \
+  tests/test_desktop.py 4
+# TRAP 4 APPLIES. The hicolor-size check catches a GIF too -- its bytes 16:24
+# are zeros, so it reports 0x0 rather than "not a PNG". What the magic check
+# uniquely covers is a real image in another format at a plausible size; the
+# entry still registers because the message changes.
+check "T8 an icon that is not a PNG is refused (see Trap 4)" src/porter/desktop.py \
+  's = s.replace("    if head[:8] != b\"\\x89PNG\\r\\n\\x1a\\n\":", "    if False:")' \
+  tests/test_desktop.py
+# `desktop.url` and `env.PORT` are one number written twice, and the drift that
+# happens is an author bumping one. The launcher then waits its whole timeout on
+# a health check nothing answers -- built, linted and installed at rc=0.
+check "T8 a desktop URL and the service port must agree" src/porter/desktop.py \
+  's = s.replace("    if in_url.isdigit() and in_url != str(declared):", "    if False:")' \
+  tests/test_desktop.py
+# build_deb'"'"'s lint allows `usr/`, so a core payload left in the desktop stage
+# is packaged into the LAUNCHER at rc=0 -- and its libraries land in the desktop
+# package'"'"'s derived Depends:, which is rule 12 running backwards.
+check "T8 the desktop package refuses a non-empty stage" src/porter/desktop.py \
+  's = s.replace("    if stage.exists() and any(stage.iterdir()):", "    if False:")' \
+  tests/test_desktop.py
+# `browser: bundled` accepted-and-ignored emits a launcher that probes the
+# client'"'"'s browser under a manifest saying it pins one.
+check "T8 a browser porter cannot ship is refused" src/porter/desktop.py \
+  's = s.replace("        if spec.browser != \"system\":", "        if False:")' \
+  tests/test_desktop.py
+# A space in the name reaches --class= as two argv entries and StartupWMClass=
+# as one string, so the window never groups under its own icon -- silently, with
+# the app working perfectly.
+check "T8 a name that is not an X11 WM_CLASS is refused" src/porter/desktop.py \
+  's = s.replace("    if not WM_CLASS.match(name):", "    if False:")' \
+  tests/test_desktop.py
+
 echo
 echo "════ control: suite green again after every restore ════"
 purge; final=$(run); echo "  restored rc=$final"
