@@ -44,7 +44,7 @@ def split(template: dict[str, str], admin_keys: list[str]) -> tuple[str, str]:
 
 
 def env_postinst(pkg: str, migrations: Sequence[Migration] = (),
-                 has_setup: bool = False) -> str:
+                 has_setup: bool = False, kind: str = "service") -> str:
     """Create the admin file if absent. NEVER prompts: a postinst that asks a
     question hangs an unattended install, which is the one thing the whole
     'same command installs and updates' promise rests on.
@@ -64,6 +64,12 @@ def env_postinst(pkg: str, migrations: Sequence[Migration] = (),
     Only one line, and only when the package actually ships that script -- an
     airgapped operator has no other place to learn the command exists, and a
     hint naming a binary that is not there is worse than no hint.
+
+    `kind` decides WHICH unit a fresh install starts, and the two are not the
+    same unit: a `oneshot` is armed by starting its `.timer` (starting its
+    `.service` would run the job now, which is not what a schedule means),
+    a `service` by starting itself. See the block below for why anything is
+    started at all.
     """
     migrate_block = migration_postinst(pkg, migrations)
     # The whole `if`, not just its body: a then-clause with nothing in it is a
@@ -78,6 +84,30 @@ def env_postinst(pkg: str, migrations: Sequence[Migration] = (),
     echo "porter: run '{pkg}-setup' to configure /etc/{pkg}/env"
   fi
 ''' if has_setup else "")
+    # `enable` LINKS a unit into a target; it starts nothing. `try-restart` is a
+    # no-op on a unit that is not running, which is exactly the fresh-install
+    # case. So until this block existed, `dpkg -i` on a client left NOTHING
+    # running: a nightly job installed at 10:00 on a machine that is not
+    # rebooted produced nothing at 03:00 -- timer enabled, package `install ok
+    # installed`, job absent. Reported by the Task 11 review 2026-08-08 as
+    # porter's characteristic bug, instance seven.
+    #
+    # Gated on an empty $2, which is a fresh install and nothing else. On an
+    # upgrade `try-restart` above already restarts what is running, and starting
+    # unconditionally would resurrect a unit the admin deliberately stopped --
+    # their decision, not the package's.
+    #
+    # `--no-block` for a service and not for a timer, because their start jobs
+    # mean different things. Arming a timer is the whole of its start job and it
+    # completes at once. A service's start job outcome is the APPLICATION's
+    # business: porter's answer to `depends_on: condition: service_healthy` is
+    # that a dependent fails its first starts and converges (systemd.py), and a
+    # postinst that adopted that verdict would leave dpkg reporting
+    # half-configured for a package that is installed correctly and converging.
+    # A unit systemd cannot even load still fails here, which is the failure
+    # worth being fatal.
+    arm = (f"systemctl start {pkg}.timer" if kind == "oneshot"
+           else f"systemctl start --no-block {pkg}.service")
     return f"""#!/bin/sh
 set -e
 if [ "$1" = configure ]; then
@@ -111,6 +141,10 @@ if [ "$1" = configure ]; then
     # Restart on upgrade so the operator needs no follow-up command. try-restart
     # is a no-op when the unit is not running, which is the fresh-install case.
     systemctl try-restart {pkg}.service
+    # ...and the fresh-install case is what this covers. See above.
+    if [ -z "$2" ]; then
+      {arm}
+    fi
   fi
 fi
 exit 0

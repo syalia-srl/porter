@@ -57,6 +57,52 @@ def test_postinst_creates_the_system_user_and_restarts_on_upgrade():
     assert "try-restart" in body
 
 
+def _configure_block(body: str) -> list[str]:
+    """The lines dpkg runs, comments stripped.
+
+    The postinst explains the shapes it replaced in prose -- "the previous shape
+    was `systemctl enable ... || true`" -- so an assertion on the raw text can
+    read a sentence as an instruction. tests/test_oneshot.py strips comments for
+    the same reason before reading the unit name out of a shipped postinst.
+    """
+    return [line for line in body.splitlines() if not line.lstrip().startswith("#")]
+
+
+def test_a_fresh_install_starts_the_service_and_an_upgrade_does_not():
+    """`enable` links; it starts nothing. `try-restart` is a no-op on a unit
+    that is not running, which IS the fresh install. So before this block a
+    `dpkg -i` left nothing running until the machine was next rebooted.
+
+    Gated on an empty `$2`: on an upgrade `try-restart` already restarts what is
+    running, and an unconditional start would resurrect a unit the admin
+    deliberately stopped.
+    """
+    lines = _configure_block(env_postinst("porter-example-service"))
+    assert '    if [ -z "$2" ]; then' in lines, lines
+    started = [ln.strip() for ln in lines if ln.strip().startswith("systemctl start")]
+    assert started == ["systemctl start --no-block porter-example-service.service"], lines
+    # ...and the gate really is around it, rather than sitting somewhere earlier
+    # in the script with the start outside it.
+    assert lines.index('    if [ -z "$2" ]; then') == lines.index(
+        "      systemctl start --no-block porter-example-service.service") - 1, lines
+
+
+def test_a_fresh_install_of_a_job_arms_the_TIMER_and_never_runs_the_job():
+    """The unit a oneshot's fresh install starts is its `.timer`.
+
+    Starting `<pkg>.service` here would run the job at install time -- 10:00 on
+    the operator's afternoon, not 03:00 -- which is the opposite of what a
+    schedule means, and it would then still not be armed.
+    """
+    lines = _configure_block(env_postinst("demo-job", kind="oneshot"))
+    started = [ln.strip() for ln in lines if ln.strip().startswith("systemctl start")]
+    assert started == ["systemctl start demo-job.timer"], lines
+    # The control: a job's postinst still ENABLES the service, because
+    # `[Install] Also=demo-job.timer` is what carries the timer along. Enabling
+    # and starting are different unit names here on purpose.
+    assert "    systemctl enable demo-job.service" in lines, lines
+
+
 def _verify(tmp_path, body: str) -> str:
     """`systemd-analyze verify` on a unit file, output read as the result.
 
