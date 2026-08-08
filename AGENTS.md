@@ -129,9 +129,17 @@ done twice.)*
 
 ## State
 
-**Scaffold. No implementation yet.** The design is settled and measured; the
-first slice is `docs/plans/2026-08-07-slice-1-example-gallery.md`.
+**Slice 1 in progress** — `docs/plans/2026-08-07-slice-1-example-gallery.md`.
 
-The `porter.yaml` schema is deliberately unspecified — it gets derived from real
-repos during the first migrations, not invented up front. Fixing a schema before
-a consumer exists is how the `build:` escape hatch becomes the default path.
+- **Task 1 done:** `src/porter/interpreter.py` — `vendor()` materialises a
+  relocatable python-build-standalone tree; `install()` puts packages in its own
+  `site-packages`. 13 tests. The guard refuses any root that is a virtualenv, is
+  not under `uv python dir`, or lacks the stdlib — because the pre-guard code
+  returned *successfully* with the wrong tree while every test stayed green.
+- **Next:** Task 2, `src/porter/deb.py` — staged tree → `.deb`, with the FHS
+  ownership lint.
+
+The `porter.yaml` schema is defined by the example gallery: each example is a
+manifest that must parse and build, so a field with no example exercising it does
+not exist. Writing the schema in prose first is how the `build:` escape hatch
+quietly becomes the default path.
