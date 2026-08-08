@@ -198,10 +198,14 @@ clean tree. `find src tests -name __pycache__ -type d -exec rm -rf {} +`.
   refused by dpkg (`end of file on stdin at conffile prompt`, rc=1, with
   `DEBIAN_FRONTEND=noninteractive` set) — the measurement rule 4 rests on,
   reproduced as a positive control.
-- **Task 4 done:** `src/porter/assemble.py` — a `Component` becomes a staged
+- **Task 4 done** (fix round 1 applied)**:** `src/porter/assemble.py` — a `Component` becomes a staged
   tree `build_deb` packages unmodified, plus `src/porter/types.py` (the
   dataclasses, which Task 7's `spec.py` will absorb a validator for) and a real
-  `porter build`. 18 tests. This is the composition that did not exist: Tasks
+  `porter build`. 25 tests. **Task 7 must extend `porter/spec.py`, not replace
+  it:** it re-exports `types.py`'s two dataclasses today, and
+  `tests/test_types.py` asserts they are the *same objects*, so a second
+  definition of `Component` takes the suite red rather than quietly giving the
+  gallery two schemas to drift between. This is the composition that did not exist: Tasks
   1–3 were primitives and every staged tree in the suite was hand-built in a
   fixture. `/usr/lib/<pkg>` is both the payload root and the unit's
   `WorkingDirectory`, so a `source_paths` entry lands under its own basename
@@ -212,9 +216,25 @@ clean tree. `find src tests -name __pycache__ -type d -exec rm -rf {} +`.
   (no `Type=`, no `.timer`, and `env_postinst` enables `<pkg>.service`
   unconditionally), an unknown kind, a non-bundled interpreter, a command
   carrying config, a non-empty stage root. And the staged interpreter must be
-  able to *import* the module the package runs: requirements omitted or
+  able to *import* what the package runs: requirements omitted or
   misspelled otherwise builds, lints and installs at rc=0 and dies at ExecStart
-  on a client with no network to fix it from.
+  on a client with no network to fix it from. That takes **three** checks and
+  each is blind to the others' failure — `module` (the runner, `uvicorn`), the
+  payload's own unconditional imports (`fastapi`, which `module` never names
+  because `app:app` is uvicorn's *argument*), and `source: ["src"]`, which only
+  a check on the tree can catch: `find_spec("src")` succeeds on a directory
+  with no `__init__.py` — it is a namespace package — while nothing inside it
+  is importable.
+
+  **`porter build` is the entry point and it now has tests of its own**
+  (`tests/test_cli.py`). It did not run: the CLI's `--stage` default is the
+  relative `build`, and every one of the 18 assemble tests passed an absolute
+  `tmp_path`, so nothing in the suite could see it. The CLI also **removes the
+  stage it creates**, pass or fail — refusing a non-empty stage is right for a
+  tree a caller pre-staged and wrong for one the CLI invents, and leaving it
+  meant the command succeeded exactly once. Anything invoking porter's own
+  entry point belongs in that file, run from a scratch cwd with every path
+  relative, and run **twice**.
 - **Next:** the nspawn gate, which is where the emitted unit is
   finally *started* by systemd. Nothing so far has run one. What *is* exercised:
   the container e2e reads `ExecStart=` and `WorkingDirectory=` out of the

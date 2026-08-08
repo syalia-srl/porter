@@ -63,7 +63,15 @@ Named, not omitted:
 - **`systemd-analyze verify` reports unrecognised keys, never missing ones.**
   Deleting `ProtectSystem=strict` leaves it green, which is why direct directive
   assertions exist alongside it.
-- **`porter build` emits `service` and `command` components only.** `oneshot`,
+- **`porter build` reads one flat single-component manifest, and emits `service`
+  and `command` kinds only.** What it does today is
+  `porter build examples/service-fastapi/porter.yaml` → a 91,460 KiB `.deb`
+  that installs in `debian:bookworm-slim` under `--network none`, on a base
+  asserted to have no `python3`, and answers `GET /health` from the ExecStart
+  read out of its own installed unit (2026-08-08). A `components:` list does
+  not exist — `examples/suite` is what introduces it — and a `python.package`
+  other than `bundled` is refused, because nothing yet knows where such an
+  interpreter would install. `oneshot`,
   and therefore every scheduled job, is *refused by name* rather than emitted:
   `systemd.unit()` takes no `Type=` and writes no `.timer`, and the postinst
   enables `<pkg>.service` unconditionally, so a oneshot pushed through them

@@ -137,6 +137,12 @@ check "T4 oneshot is refused by name, with the reason (MESSAGE ONLY -- see Trap 
 # This one is a real refusal, and nothing else catches it: with it gone,
 # `kind: sevice` falls through to the command branch and assemble RETURNS a
 # staged wrapper at rc=0 for a component that asked for a unit.
+#
+# That symptom is the FIXTURE's, and the fixture carries a bin_name. The typo
+# this guard is really for -- a *service* manifest with `kind: sevice`, which
+# therefore has no bin_name -- lands instead in the `bindir / None` TypeError
+# the bin_name entry above is honestly labelled incidental for. The guard is
+# worth having either way; rc=0 with a wrapper is not the only shape it stops.
 check "T4 an unknown kind is refused" src/porter/assemble.py \
   's = s.replace("if component.kind not in SUPPORTED_KINDS:", "if False:")' tests/test_assemble.py
 check "T4 an interpreter porter does not bundle is refused" src/porter/assemble.py \
