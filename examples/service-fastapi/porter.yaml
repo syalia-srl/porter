@@ -15,6 +15,18 @@ description: porter's example FastAPI service
 maintainer: porter <porter@example.com>
 architecture: amd64
 
+# What porter emits for this component: a systemd unit. The other kind that
+# exists today is `command` (a wrapper in /usr/bin, no unit); `oneshot` is
+# refused until examples/oneshot-timer exists to define it.
+kind: service
+
+# What lands in /usr/lib/demo-app/, each entry under its own basename. That
+# directory is the unit's WorkingDirectory and therefore the import root, which
+# is why this is `src/app.py` and not `src`: `-m uvicorn app:app` has to find
+# `app` there. Paths are relative to this file's directory.
+source:
+  - src/app.py
+
 # Which interpreter, declared by the project. porter hardcodes no version:
 # rule 10. `bundled` is the only shape this example needs -- the interpreter
 # lives inside this package, not in one of its own.

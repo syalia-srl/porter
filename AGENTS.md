@@ -198,7 +198,24 @@ clean tree. `find src tests -name __pycache__ -type d -exec rm -rf {} +`.
   refused by dpkg (`end of file on stdin at conffile prompt`, rc=1, with
   `DEBIAN_FRONTEND=noninteractive` set) — the measurement rule 4 rests on,
   reproduced as a positive control.
-- **Next:** Task 4 — the nspawn gate, which is where the emitted unit is
+- **Task 4 done:** `src/porter/assemble.py` — a `Component` becomes a staged
+  tree `build_deb` packages unmodified, plus `src/porter/types.py` (the
+  dataclasses, which Task 7's `spec.py` will absorb a validator for) and a real
+  `porter build`. 18 tests. This is the composition that did not exist: Tasks
+  1–3 were primitives and every staged tree in the suite was hand-built in a
+  fixture. `/usr/lib/<pkg>` is both the payload root and the unit's
+  `WorkingDirectory`, so a `source_paths` entry lands under its own basename
+  *in* it — `["src/app.py"]`, never `["src"]`, or the module is one directory
+  below the import root and the service dies at its first request.
+  `conffiles` are derived from the staged tree and returned, never re-derived
+  by the caller. Refusals follow deb.py: **refuse, never repair** — `oneshot`
+  (no `Type=`, no `.timer`, and `env_postinst` enables `<pkg>.service`
+  unconditionally), an unknown kind, a non-bundled interpreter, a command
+  carrying config, a non-empty stage root. And the staged interpreter must be
+  able to *import* the module the package runs: requirements omitted or
+  misspelled otherwise builds, lints and installs at rc=0 and dies at ExecStart
+  on a client with no network to fix it from.
+- **Next:** the nspawn gate, which is where the emitted unit is
   finally *started* by systemd. Nothing so far has run one. What *is* exercised:
   the container e2e reads `ExecStart=` and `WorkingDirectory=` out of the
   **installed unit file** and runs the first from the second, with a positive

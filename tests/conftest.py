@@ -161,6 +161,30 @@ def demo_manifest() -> dict:
 
 
 @pytest.fixture(scope="session")
+def src_tree(tmp_path_factory) -> Path:
+    """A source root for `assemble` to stage out of.
+
+    `src/app.py` is the gallery's own FastAPI app, copied rather than rewritten
+    so a change to the example reaches here too. `src/hello.py` is the
+    command-kind payload the gallery has no entry for yet
+    (`examples/command`, docs/design-spec.md): it prints one line, which is what
+    lets the staged wrapper be *run* rather than merely read.
+    """
+    root = tmp_path_factory.mktemp("src")
+    (root / "src").mkdir()
+    shutil.copy(EXAMPLE / "src/app.py", root / "src/app.py")
+    (root / "src/hello.py").write_text(
+        'def main() -> None:\n'
+        '    print("hello from the vendored interpreter")\n'
+        '\n'
+        '\n'
+        'if __name__ == "__main__":\n'
+        '    main()\n'
+    )
+    return root
+
+
+@pytest.fixture(scope="session")
 def demo_stage(tmp_path_factory, demo_manifest) -> Path:
     """Everything in the example's package except the version-specific config.
 

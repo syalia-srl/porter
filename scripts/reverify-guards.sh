@@ -126,6 +126,45 @@ check "T3 env is chmod 600" src/porter/config.py \
 check "T3 admin env is read, and read last" src/porter/systemd.py \
   's = s.replace("EnvironmentFile=-/etc/{pkg}/env", "EnvironmentFile=/etc/{pkg}/defaults")' tests/test_config.py
 
+echo "════ Task 4 — assemble ════"
+# `oneshot` is refused BY NAME purely to say why and what unblocks it. Trap 4:
+# the generic SUPPORTED_KINDS check below refuses it too, so removing this alone
+# does not let a oneshot through -- what it loses is the message. The test
+# therefore matches "oneshot-timer", which only this branch emits.
+check "T4 oneshot is refused by name, with the reason (MESSAGE ONLY -- see Trap 4)" \
+  src/porter/assemble.py \
+  's = s.replace("if component.kind == \"oneshot\":", "if False:")' tests/test_assemble.py
+# This one is a real refusal, and nothing else catches it: with it gone,
+# `kind: sevice` falls through to the command branch and assemble RETURNS a
+# staged wrapper at rc=0 for a component that asked for a unit.
+check "T4 an unknown kind is refused" src/porter/assemble.py \
+  's = s.replace("if component.kind not in SUPPORTED_KINDS:", "if False:")' tests/test_assemble.py
+check "T4 an interpreter porter does not bundle is refused" src/porter/assemble.py \
+  's = s.replace("if not python.bundled:", "if False:")' tests/test_assemble.py
+# Removed, a command's declared env is silently dropped: the command branch
+# writes no /etc at all, so assemble returns rc=0 having thrown the config away.
+check "T4 a command may not declare config" src/porter/assemble.py \
+  's = s.replace("if component.defaults or component.admin_keys:", "if False:")' tests/test_assemble.py
+# Incidental failure, not a silent success: without it, `bindir / None` raises
+# TypeError deep in staging. The guard buys a legible refusal BEFORE 97 MB is
+# vendored, which is worth an entry but is not the same class as the others.
+check "T4 a command needs a bin_name (incidental -- TypeError without it)" \
+  src/porter/assemble.py \
+  's = s.replace("if not component.bin_name:", "if False:")' tests/test_assemble.py
+# Removed, a second build into a directory still holding the previous
+# component's tree stages on top of it and ships both, at rc=0.
+check "T4 a non-empty stage root is refused, never emptied" src/porter/assemble.py \
+  's = s.replace("if stage.exists() and any(stage.iterdir()):", "if False:")' tests/test_assemble.py
+# The airgap failure that looks like success on the build host: requirements
+# omitted, .deb builds and lints and installs, ExecStart dies on the client.
+check "T4 the staged interpreter must be able to import the module" src/porter/assemble.py \
+  's = s.replace("if probe.returncode != 0:", "if False:")' tests/test_assemble.py
+# conffiles are DERIVED from the staged tree and returned, so the caller cannot
+# get them wrong. Emptied, deb.py's lint refuses the build -- loudly, which is
+# the designed outcome and the reason assemble returns them at all.
+check "T4 conffiles are derived from the staged etc/ tree" src/porter/assemble.py \
+  's = s.replace("return sorted(found)", "return []")' tests/test_assemble.py
+
 echo
 echo "════ control: suite green again after every restore ════"
 purge; final=$(run); echo "  restored rc=$final"

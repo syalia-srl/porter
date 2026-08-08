@@ -63,6 +63,14 @@ Named, not omitted:
 - **`systemd-analyze verify` reports unrecognised keys, never missing ones.**
   Deleting `ProtectSystem=strict` leaves it green, which is why direct directive
   assertions exist alongside it.
+- **`porter build` emits `service` and `command` components only.** `oneshot`,
+  and therefore every scheduled job, is *refused by name* rather than emitted:
+  `systemd.unit()` takes no `Type=` and writes no `.timer`, and the postinst
+  enables `<pkg>.service` unconditionally, so a oneshot pushed through them
+  would install at rc=0 and run as a permanently-restarting service.
+  `examples/oneshot-timer` is what unblocks it. `examples/command` does not
+  exist yet either — the kind is implemented and tested, but the gallery entry
+  that would define its manifest shape is still owed.
 - **`sudo -n` refuses rather than prompting**, by choice: a hidden password prompt
   in an unattended run is indistinguishable from a hang.
 - **The 2 GB figure is synthetic** — `/dev/urandom` payloads, not a real image.
