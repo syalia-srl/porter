@@ -4,7 +4,7 @@
 
 **Goal:** porter builds, gates and publishes a gallery of in-repo example projects covering every packaging shape we care about — a FastAPI service, a plain command, a scheduled oneshot, a multi-component suite, and a near-native desktop app — each installable and upgradable on an airgapped Debian-family box with no Docker and no system Python.
 
-**Architecture:** Seven tasks, vertically sliced. Task 1 vendors a relocatable CPython; Task 2 turns a staged tree into a `.deb`; **Task 3 is the end-to-end moment** — `examples/service-fastapi` answering HTTP from an installed package under a real systemd unit; Task 4 adds the USB apt repo and the upgrade path; Task 5 adds the gate; Task 6 fills in the rest of the gallery; Task 7 adds the desktop shape and the derived-`Depends:` mechanism it needs.
+**Architecture:** Eight tasks, vertically sliced. Task 1 vendors a relocatable CPython; Task 2 turns a staged tree into a `.deb`; **Task 3 is the end-to-end moment** — `examples/service-fastapi` answering HTTP from an installed package under a real systemd unit; Task 5 adds the USB apt repo and the upgrade path; Task 6 adds the gate; Task 7 fills in the rest of the gallery; Task 8 adds the desktop shape and the derived-`Depends:` mechanism it needs.
 
 **Why examples before a real app.** The gallery is a shipped feature, not scaffolding: it is porter's documentation *and* its regression suite. Every example is a gate fixture, so each packaging shape is exercised on every build, and a new consumer starts by copying the example nearest its shape rather than reading a schema. 
 
@@ -612,7 +612,111 @@ git commit -m "feat(config): split package-owned defaults from admin-owned env; 
 
 ---
 
-### Task 4: Flat apt repo, USB tree, and the upgrade path
+### Task 4: `assemble` — a Component becomes a staged tree
+
+**Files:**
+- Create: `src/porter/assemble.py`
+- Create: `tests/test_assemble.py`
+
+**Interfaces:**
+- Consumes: `vendor`/`install` (Task 1), `build_deb` (Task 2), `split`/`env_postinst` (Task 3), `unit` (Task 3).
+- Produces: `assemble(component: Component, python: Python, src_root: Path, stage_root: Path) -> Staged`, where `Staged` is a dataclass carrying `.stage: Path`, `.conffiles: list[str]`, `.control: dict[str, str]` and `.scripts: dict[str, str]` — everything `build_deb` needs, so the caller never re-derives it.
+
+This is the stage that was missing: Tasks 1–3 build primitives, Tasks 6–8 assume a working `porter build`, and nothing composed them. Without it `cli.build` only prints.
+
+- [ ] **Step 1: Write the failing tests**
+
+```python
+# tests/test_assemble.py
+from pathlib import Path
+import pytest
+from porter.assemble import assemble
+from porter.spec import Component, Python
+
+PY = Python(version="3.12", package="bundled")
+
+
+def _svc(**kw):
+    base = dict(name="demo", package="porter-example-service", description="d",
+                kind="service", entrypoint="app:app", source_paths=["src"],
+                requirements=[], defaults={"PORT": "9000"}, admin_keys=["TOKEN"])
+    base.update(kw)
+    return Component(**base)
+
+
+def test_declares_every_etc_file_as_a_conffile(tmp_path, src_tree):
+    """Task 2's lint refuses any file under etc/ that is not declared. If
+    assemble does not return them, every build fails at the lint."""
+    st = assemble(_svc(), PY, src_tree, tmp_path / "stage")
+    assert "/etc/porter-example-service/defaults" in st.conffiles
+
+
+def test_never_stages_the_admin_env_file(tmp_path, src_tree):
+    """env is admin-owned; shipping it is refused by the lint and would
+    overwrite a client's secrets on upgrade."""
+    st = assemble(_svc(), PY, src_tree, tmp_path / "stage")
+    assert not (st.stage / "etc/porter-example-service/env").exists()
+    assert (st.stage / "usr/share/porter-example-service/env.example").exists()
+
+
+def test_service_gets_a_unit_command_does_not(tmp_path, src_tree):
+    svc = assemble(_svc(), PY, src_tree, tmp_path / "a")
+    assert (svc.stage / "usr/lib/systemd/system/porter-example-service.service").exists()
+    cmd = assemble(_svc(kind="command", bin_name="porter-hello", entrypoint="hello:main",
+                        defaults={}, admin_keys=[]), PY, src_tree, tmp_path / "b")
+    assert not list((cmd.stage / "usr/lib/systemd/system").glob("*")) if (cmd.stage / "usr/lib/systemd/system").exists() else True
+    assert (cmd.stage / "usr/bin/porter-hello").exists()
+
+
+def test_the_staged_tree_passes_build_deb_unmodified(tmp_path, src_tree):
+    """The integration this task exists for: assemble's output must be
+    directly packageable. A tree that needs hand-fixing before build_deb is
+    not an assemble."""
+    from porter.deb import build_deb
+    st = assemble(_svc(), PY, src_tree, tmp_path / "stage")
+    deb = build_deb(st.stage, st.control, tmp_path / "out",
+                    conffiles=st.conffiles, scripts=st.scripts)
+    assert deb.exists() and deb.stat().st_size > 1024
+
+
+def test_entrypoint_is_invoked_via_python_m_not_a_console_script(tmp_path, src_tree):
+    """Console-script shebangs are absolute build paths and break on the
+    client. The unit must go through the interpreter."""
+    st = assemble(_svc(), PY, src_tree, tmp_path / "stage")
+    body = (st.stage / "usr/lib/systemd/system/porter-example-service.service").read_text()
+    assert "/python/bin/python3.12 -m " in body
+    assert "/bin/uvicorn" not in body
+```
+
+Add a `src_tree` fixture to `tests/conftest.py`: a directory containing `src/app.py` with a trivial FastAPI app.
+
+- [ ] **Step 2: Run tests to verify they fail**
+
+Run: `PORTER_REQUIRE_UV=1 uv run --extra dev pytest tests/test_assemble.py -v`
+Expected: FAIL — `ModuleNotFoundError: No module named 'porter.assemble'`
+
+- [ ] **Step 3: Implement**
+
+`assemble` must, in order: create the stage; vendor the interpreter into `usr/lib/<pkg>/python` and install `requirements` into it when `python.bundled`; copy each `source_paths` entry into `usr/lib/<pkg>/`; write `etc/<pkg>/defaults` and `usr/share/<pkg>/env.example` from `split(...)`; emit a unit into `usr/lib/systemd/system/` for `service` and `oneshot` kinds (plus a `.timer` when `schedule` is set); write a `usr/bin/<bin_name>` wrapper for `command` kind that execs `…/python/bin/python<ver> -m <module>`; and return `Staged` with `conffiles` listing every file it placed under `etc/`.
+
+Return the conffiles list — do not make the caller re-derive it. Task 2's lint refuses undeclared `etc/` files, so a wrong list fails loudly rather than shipping.
+
+- [ ] **Step 4: Run tests to verify they pass**
+
+Run: `PORTER_REQUIRE_UV=1 uv run --extra dev pytest -v`
+
+- [ ] **Step 5: Wire `cli.build` end-to-end and commit**
+
+`porter build` must now call `assemble` then `build_deb` per component and write real `.deb` files to `--out`. Replace the printing stub.
+
+```bash
+git add src/porter/assemble.py tests/test_assemble.py tests/conftest.py src/porter/cli.py
+git commit -m "feat(assemble): a Component becomes a packageable staged tree"
+```
+
+---
+
+### Task 5: Flat apt repo, USB tree, and the upgrade path
 
 **Files:**
 - Create: `src/porter/repo.py`
@@ -793,7 +897,7 @@ git commit -m "feat(repo): flat apt index from dpkg-deb --field, plus the USB tr
 
 ---
 
-### Task 5: The gate
+### Task 6: The gate
 
 **Files:**
 - Create: `src/porter/gate.py`
@@ -982,7 +1086,7 @@ git commit -m "feat(gate): prove bundles offline, with controls and mutation tes
 
 ---
 
-### Task 6: the rest of the gallery — command, oneshot, suite
+### Task 7: the rest of the gallery — command, oneshot, suite
 
 **Files:**
 - Create: `src/porter/spec.py`, `src/porter/cli.py`
@@ -1262,7 +1366,7 @@ git commit -m "feat(examples): command, oneshot and suite shapes as gate fixture
 
 ---
 
-### Task 7: the desktop shape, and `Depends:` derived from ELF headers
+### Task 8: the desktop shape, and `Depends:` derived from ELF headers
 
 **Files:**
 - Create: `src/porter/depends.py`
@@ -1494,13 +1598,13 @@ Named so they are decisions, not omissions:
   This plan builds the tool.
 - **`python.package: shared`.** Slice 1 implements `bundled` only, which vendors the interpreter inside each component (~97 MB duplicated the moment a project has two). Emitting a separate interpreter package — named by the project, not by porter — is a later porter slice; `examples/suite` is the fixture that will prove the `Depends:` resolves offline.
 - **`<app>-setup`**, the interactive first-run wizard. Slice 1 seeds `/etc/<pkg>/env` with empty placeholders; the sysadmin edits it by hand, exactly as today.
-- **`systemd-nspawn` gating.** Task 5 gates in Docker with `--network none`, which proves the payload, the upgrade and client-state survival but *not* the unit under real systemd. A later porter slice.
+- **`systemd-nspawn` gating.** Task 6 gates in Docker with `--network none`, which proves the payload, the upgrade and client-state survival but *not* the unit under real systemd. A later porter slice.
 - **GPG signing** of the repo (`[trusted=yes]` for now), the bwrap sandbox, and metapackages for UNE's two machines.
-- **A bundled browser.** Task 7 ships the desktop shape with `browser: system` (probe what the client has), which needs no download and no licence decision. `browser: {source, sha256}` — pinning a Chromium build — waits until that artifact has been verified against its terms.
+- **A bundled browser.** Task 8 ships the desktop shape with `browser: system` (probe what the client has), which needs no download and no licence decision. `browser: {source, sha256}` — pinning a Chromium build — waits until that artifact has been verified against its terms.
 
 ## Self-review
 
 - **Spec coverage.** FHS contract → Task 2 lint; split config → Task 3; install≠configure≠update → Tasks 3–4; systemd replaces compose → Tasks 3 and 6; autonomous install → Task 4, asserted in Task 5; delivery/USB → Task 4; gate → Task 5; `porter.yaml` and every packaging shape → Task 6; desktop and derived `Depends:` → Task 7. Sandbox, GPU, GPG signing and real-app migrations are explicitly deferred above.
 - **Type consistency:** `build_deb`, `vendor`, `install`, `split`, `env_postinst`, `unit`, `write_index`, `usb_tree`, `gate`, `load`, `derive_depends`, `launcher`, `desktop_entry` are each defined once and referenced with matching signatures. `load` returns `(Python, list[Component])` everywhere.
 - **Known gap, deliberate:** the pytest fixtures (`built_demo_deb`, `docker_image`, `two_demo_debs`, `built_usb`, `good_usb`, `state_eating_usb`, `truncated_usb`) are described rather than written out. They are mechanical compositions of Tasks 1–2 and writing them here would duplicate several hundred lines; the *mutations* and properties they must express are specified exactly. Write them in Task 3 and extend per task.
-- **Deferred verification, carried from the spec:** whether the chromeless window genuinely reads as native is a visual check needing a display and a human; and the concrete Chromium build to bundle must be verified against its terms before Task 7 ships, not inferred.
+- **Deferred verification, carried from the spec:** whether the chromeless window genuinely reads as native is a visual check needing a display and a human; and the concrete Chromium build to bundle must be verified against its terms before Task 8 ships, not inferred.
