@@ -68,6 +68,18 @@ PY
     echo "  SKIP  $label — pattern did not match; the file is unchanged"
     cp /tmp/rv.keep "$file"; purge; fail=1; return
   fi
+  # Trap 6: `s.replace(old, new)` is a SUBSTRING match with no occurrence limit.
+  # A Task 4 entry drifted onto Task 11's .timer branch and made this gate report
+  # FAIL on healthy code (2026-08-08). With 67 entries that recurs, and the
+  # failure mode is indistinguishable from a real regression. A mutation is meant
+  # to disable ONE guard: if it rewrote several places, the verdict below is
+  # about something other than the guard named.
+  local changed
+  changed=$(diff /tmp/rv.keep "$file" | grep -c '^[<>]' || true)
+  if [ "${changed:-0}" -gt 2 ]; then
+    echo "  SKIP  $label — mutation rewrote $changed lines; expected one site. Narrow the pattern."
+    cp /tmp/rv.keep "$file"; purge; fail=1; return
+  fi
   purge
   local rc; rc=$(run "$scope")
   cp /tmp/rv.keep "$file"; purge

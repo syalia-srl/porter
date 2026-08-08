@@ -27,3 +27,12 @@ porter = "porter.cli:main"
 [build-system]
 requires = ["hatchling"]
 build-backend = "hatchling.build"
+
+[tool.pytest.ini_options]
+# The suite vendors a ~97 MB interpreter per test that needs one, into pytest's
+# tmp root -- which is tmpfs here. pytest keeps the last THREE runs by default,
+# and that reached 11 GB and started failing tests with "Disk quota exceeded"
+# (2026-08-08). Keep one run, and only when it failed: a green run's tree is
+# never read again.
+tmp_path_retention_count = 1
+tmp_path_retention_policy = "failed"
