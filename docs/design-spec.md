@@ -410,11 +410,15 @@ layout, lint, packaging, the gate and the repo for free. Without that escape
 hatch the tool becomes a second thing to fight; without the shared parts, the
 copy-paste drift returns.
 
-**The `porter.yaml` schema is deliberately not specified here.** It should be
-derived from the four real repos during the first migration rather than invented
-up front — the fields that matter are the ones `sigere-api`, then
-transforma-cuba, then ainbox actually need. Fixing a schema before the first
-consumer exists is how the escape hatch becomes the default path.
+**The `porter.yaml` schema is deliberately not specified here.** It is defined by
+the example gallery: each example is a manifest that must parse and build, so the
+schema is whatever the shapes in `examples/` require, and a field with no example
+exercising it does not exist. Writing a schema in prose first is how the `build:`
+escape hatch quietly becomes the default path — the fields drift from what the
+code reads, and the manifest stops being trustworthy.
+
+When an adopter's shape is not in the gallery, the answer is a **new example**,
+added here, not a special case in their repo.
 
 ### Pipeline
 
@@ -459,10 +463,19 @@ that look like passes on the build host.
 Because config is split, no conffile can ever conflict, so no `--force-confold`
 dance is required. Rollback is keeping the previous `.deb` in the repo.
 
-**Multi-machine deployments become metapackages.** UNE's two boxes:
-`une-tecnologica` → `Depends: une-sigere-api, une-scheduler`; `une-corporativa`
-→ `Depends: une-directivos`. One name per machine; dpkg resolves the rest from
-the same USB. See [[reference_une_despliegue_dos_maquinas]].
+**Multi-machine deployments become metapackages.** A project declares one
+metapackage per machine role; the sysadmin installs a single name per box and
+dpkg resolves the components from the same USB. `examples/suite` is the shape:
+
+```yaml
+metapackages:
+  - package: porter-example-suite
+    depends: [porter-example-suite-api, porter-example-suite-tool]
+```
+
+A deployment split across a technical machine and a corporate one is two
+metapackages over the same component set — which is the case that motivated the
+shape, and it needs nothing from porter beyond the above.
 
 ## What this retires
 
