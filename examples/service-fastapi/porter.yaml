@@ -1,0 +1,46 @@
+# The first entry in porter's example gallery: a headless HTTP service.
+#
+# The gallery defines the manifest schema -- every field here is read by
+# something, and porter has no field that no example exercises. Today the
+# reader is tests/conftest.py (the `demo_stage` fixture); at Task 6 it becomes
+# porter's own assemble stage, against this same file.
+#
+# What this example is for: it is the end-to-end proof that a client which has
+# no Python, no Docker and no network can install one .deb and get an HTTP
+# service, and can then be upgraded without losing its own configuration.
+
+package: demo-app
+version: "1.0"
+description: porter's example FastAPI service
+maintainer: porter <porter@example.com>
+architecture: amd64
+
+# Which interpreter, declared by the project. porter hardcodes no version:
+# rule 10. `bundled` is the only shape this example needs -- the interpreter
+# lives inside this package, not in one of its own.
+python:
+  version: "3.12"
+  package: bundled
+
+requirements:
+  - fastapi
+  - uvicorn
+
+# `python -m <module>`, never a bin/ console script: rule 3, their shebangs are
+# absolute build-host paths. ${PORT} is substituted by systemd from the
+# EnvironmentFiles, so the port is config and not a baked-in constant.
+exec:
+  module: uvicorn
+  args: ["app:app", "--host", "127.0.0.1", "--port", "${PORT}"]
+
+# One template, split by owner into /etc/demo-app/defaults (package-owned,
+# a conffile) and /etc/demo-app/env (admin-owned, created by postinst and
+# never shipped). TUNING stands for a value we correct in a later version and
+# need to reach every client; GREETING stands for the client's own secret.
+env:
+  PORT: "9000"
+  TUNING: from-defaults
+  GREETING: ""
+
+admin_keys:
+  - GREETING
