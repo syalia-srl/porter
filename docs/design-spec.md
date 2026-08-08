@@ -323,9 +323,9 @@ The supply is declared per project, as a URL and a checksum:
 
 ```yaml
 desktop:
-  name: AInBox
-  url: http://127.0.0.1:8080
-  icon: assets/ainbox.png
+  name: PorterDemo
+  url: http://127.0.0.1:9200
+  icon: assets/icon.png
   wait_for_health: /health        # poll before opening, so a click right after
                                   # login does not show connection-refused
   browser: system                 # probe what the client has (default)
