@@ -65,11 +65,24 @@ if [ "$1" = configure ]; then
     cp /usr/share/{pkg}/env.example /etc/{pkg}/env
     chmod 600 /etc/{pkg}/env
   fi
-  systemctl daemon-reload || true
-  systemctl enable {pkg}.service >/dev/null 2>&1 || true
-  # Restart on upgrade so the operator needs no follow-up command. try-restart
-  # is a no-op when the unit is not running, which is the fresh-install case.
-  systemctl try-restart {pkg}.service >/dev/null 2>&1 || true
+  # /run/systemd/system exists only on a BOOTED systemd host. That is the whole
+  # discrimination: in a container, a chroot or a debootstrap there is no
+  # systemd to enable anything with, and the calls must be skipped. On a real
+  # client there is, and a failure must be fatal.
+  #
+  # The previous shape was `systemctl enable ... >/dev/null 2>&1 || true`, which
+  # is correct for the first case and silently wrong for the second: a masked
+  # unit, a malformed unit or a full /etc makes `enable` fail, dpkg still exits
+  # 0, and the service is simply absent after the next reboot. No `|| true`
+  # belongs here -- `set -e` plus dpkg is exactly the machinery for a postinst
+  # step that must not fail quietly.
+  if [ -d /run/systemd/system ]; then
+    systemctl daemon-reload
+    systemctl enable {pkg}.service
+    # Restart on upgrade so the operator needs no follow-up command. try-restart
+    # is a no-op when the unit is not running, which is the fresh-install case.
+    systemctl try-restart {pkg}.service
+  fi
 fi
 exit 0
 """
