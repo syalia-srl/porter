@@ -21,6 +21,10 @@ behind every decision, in `docs/design-spec.md`.
 no system Python. The interpreter is vendored; native binaries are built on the
 glibc floor; everything else is package payload.
 
+**And the install runs with nobody watching.** An airgapped client has no
+interactive fallback, so a prompt is not an inconvenience — it is a hang. Every
+path is non-interactive by construction, not by flag.
+
 Docker is a **build** dependency and never a client one. That asymmetry is the
 whole design; do not erode it.
 
@@ -43,6 +47,16 @@ evidence; this is the short form.
    `<app>-setup`, a separate first-run wizard.
 6. **The package never writes to `/var/lib/<pkg>/`.** That is the client's.
 7. **Ubuntu 22.04 is the build floor.** Verified to run on glibc 2.35 → 2.41.
+8. **Static system user, never `DynamicUser=yes`.** The latter redirects state to
+   `/var/lib/private/<pkg>` at `700 root:root` — a non-root operator can neither
+   read nor list it, so backups, monitoring and support all require root, and
+   admin-dropped files change owner as the UID rotates.
+9. **The install reaches no prompt.** `sudo -n` or an explicit refusal; never
+   block on a password. `NEEDRESTART_SUSPEND` is not a real variable — it is
+   absent from needrestart 3.6's code. Only `NEEDRESTART_MODE` is.
+10. **porter hardcodes no interpreter name or version.** Which Python, and
+    whether it is bundled per component or emitted as its own package, is
+    declared in each project's `porter.yaml`. No vendor prefix belongs in porter.
 
 ## The gate rule
 

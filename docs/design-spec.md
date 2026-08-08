@@ -85,6 +85,8 @@ Every load-bearing claim below was measured on 2026-08-07. Probes live in
 | P2/P2b/P2c | how should `/etc/<pkg>/env` survive an upgrade? | **Split it in two.** Single-file fails outright |
 | P4/P4b | can `bwrap` replace the Docker sandbox? | **Yes — all six operations**, each behind a positive control |
 | P5/P5b | does a 2 GB `.deb` work, and what does it cost? | **Yes.** Peak transient 2× payload, apt adds no cache cost |
+| P7 | does an install complete with no TTY and stdin closed? | **Yes**, rc=0, no prompt, with a broken apt source and an edited conffile |
+| P8/P8c | `DynamicUser` or a static user for client state? | **Static.** `/var/lib/private` is `700 root:root`; non-root cannot read or list |
 
 ### P1b — no venv
 
@@ -150,18 +152,38 @@ that is a stated precondition, not a redesign.
 
 ```
 /usr/lib/<pkg>/               app code, native binaries           package-owned
-/usr/lib/<vendor>-python3.12/ the vendored interpreter            its OWN package
+/usr/lib/<pkg>/python/         the vendored interpreter (bundled)  package-owned
+/usr/lib/<interp-pkg>/python/  the vendored interpreter (shared)   its OWN package
 /usr/share/<pkg>/             baked data, models, static assets   package-owned
 /etc/<pkg>/defaults           package-owned config       conffile
 /etc/<pkg>/env                admin-owned config         NEVER shipped in the .deb
-/var/lib/<pkg>/               client state               package NEVER writes here
+/var/lib/<pkg>/               client state   750 root:<pkg>  package NEVER writes here
 /usr/lib/systemd/system/      units                      package-owned
 ```
 
-The interpreter is deliberately *not* under `/usr/lib/<pkg>/`: it is 97 MB, and
-app packages `Depends:` on it so eight ainbox services share one copy instead of
-duplicating ~780 MB. Version-qualifying the package name (`-python3.12`) lets two
-interpreter generations coexist if an app ever needs a different one.
+**Interpreter packaging is a per-project decision, declared in `porter.yaml`.**
+porter hardcodes neither a name nor a version — it ships whatever interpreter the
+project asks for, under whatever package name the project chooses.
+
+```yaml
+python:
+  version: "3.12"       # whatever this project needs
+  package: bundled      # interpreter lives inside each component's own package
+# or
+python:
+  version: "3.13"
+  package: une-python313   # emitted as its own .deb; components Depends: on it
+```
+
+`bundled` is the default and the simpler artifact: one package, nothing to
+resolve. Reach for `shared` only when two or more components would otherwise
+each carry their own copy — the interpreter is 97 MB before any dependency, so
+eight ainbox services bundling separately duplicate ~780 MB. Version-qualifying
+the chosen name lets two interpreter generations coexist when one component
+needs a different one.
+
+There is no `syalia-`-prefixed anything in porter. A vendor prefix belongs to the
+project that sets it.
 
 This is une-tools' `reference/`-vs-`data/` split enforced by dpkg's file database
 instead of by a guard script. Two hand-built things become generic: `_check-staged.sh`
@@ -188,9 +210,10 @@ EnvironmentFile=/etc/<pkg>/defaults
 EnvironmentFile=-/etc/<pkg>/env      # admin last, wins
 ```
 
-Verified through a real systemd unit under `DynamicUser=yes` with `/etc/<pkg>/env`
-at mode 600 root — systemd reads `EnvironmentFile` as root before dropping
-privileges, so hardening and secrets do not collide.
+Verified through a real systemd unit with `/etc/<pkg>/env` at mode 600 root
+while the service ran unprivileged — systemd reads `EnvironmentFile` as root
+*before* dropping privileges, so a secret the service user cannot itself read
+still reaches its environment. Hardening and secrets do not collide.
 
 ### Install ≠ configure ≠ update
 
@@ -216,8 +239,23 @@ dpkg knows which it is; the sysadmin does not have to.
 
 Services become units; `depends_on` becomes `After=`/`Requires=`; volumes become
 `/var/lib/<pkg>/`; `mem_limit`/`nano_cpus` become `MemoryMax=`/`CPUQuota=` (the
-same cgroups); container isolation becomes `DynamicUser=`, `ProtectSystem=strict`,
-`PrivateTmp=`, `NoNewPrivileges=`. The `network_mode: host` / container-localhost
+same cgroups); container isolation becomes `ProtectSystem=strict`, `PrivateTmp=`,
+`NoNewPrivileges=`.
+
+**Not `DynamicUser=yes`.** It looks like free hardening and is wrong for this
+product. Measured 2026-08-07: it allocates a fresh UID per boot and redirects
+`StateDirectory` to `/var/lib/private/<pkg>`, which is `700 root:root` — a
+non-root operator can neither read nor list client state, so backups, monitoring
+and support all require root. It also rewrites the ownership of admin-dropped
+files as the UID rotates, which makes "the client owns `/var/lib/<pkg>`" false.
+Services run as a **static system user** created in `postinst`
+(`useradd --system --no-create-home --shell /usr/sbin/nologin <pkg>`), with state
+at a real `/var/lib/<pkg>` mode `750 root:<pkg>`. That layout passed every
+non-root access check the private one failed.
+
+This matters concretely: UNE's sysadmin curates `data/kb/` and drops in their own
+`deficit.csv` for the service to read. State the service can see but the operator
+cannot is not a hardening win. The `network_mode: host` / container-localhost
 trap (#5 in the pattern doc) disappears entirely — everything is on the host's
 loopback.
 
@@ -226,6 +264,33 @@ has no systemd equivalent. Nine ainbox services converge via `Restart=on-failure
 rather than health-gated sequencing. This is how every distro runs interdependent
 services and is arguably more robust than a one-shot gate, but it is a real
 change and it is a decision, not an oversight.
+
+### Autonomous installation
+
+**The installer must complete with nobody watching.** That is a requirement, not
+a mode: there is no interactive path to fall back to on an airgapped client.
+
+- **`--yes` is the contract, and it accepts everything.** `install.sh` reaches no
+  prompt by construction, verified under `setsid` with stdin closed.
+- **Privilege: `sudo -n`, or an explicit refusal.** Not root and passwordless
+  sudo unavailable → exit with the reason. It never blocks on a password, because
+  a hidden password prompt in an unattended run is indistinguishable from a hang.
+- **Environment guards that are real:** `DEBIAN_FRONTEND=noninteractive`,
+  `NEEDRESTART_MODE=a`, `UCF_FORCE_CONFOLD=1`, `-o Dpkg::Use-Pty=0`, and
+  `--force-confold`/`--force-confdef` as defence in depth for dependencies porter
+  does not control. **`NEEDRESTART_SUSPEND` is not a real variable** — it is
+  absent from needrestart 3.6's shipped code (measured) and must not be
+  reintroduced.
+- **`apt-get update` is scoped to our own list file**
+  (`-o Dir::Etc::sourcelist=... -o Dir::Etc::sourceparts=-`). A client with a
+  stale or unreachable network source in `sources.list.d/` must not be able to
+  break an offline install. Verified with a deliberately broken source present.
+- **needrestart is structurally unreachable**, not merely suppressed: porter
+  packages upgrade no shared system libraries — they vendor their dependencies
+  and `Depends:` only on other packages porter itself produced — so the "which
+  services should be restarted" dialog has nothing to trigger it.
+- **`postinst` restarts the service itself** (`systemctl try-restart`), so an
+  upgrade needs no follow-up command.
 
 ### The sandbox: bwrap, not Docker
 
@@ -344,6 +409,15 @@ Named rather than resolved, with the evidence that exists:
   official static Linux tarballs take the same vendoring path as CPython.
 - **The 2 GB figure is synthetic.** Measured with `/dev/urandom` payloads, not
   the real engine image.
+- **needrestart's interactive dialog was never reproduced.** Its apt hook is
+  live on Ubuntu 24.04 and `NEEDRESTART_MODE` is present in the shipped code, but
+  a container has no outdated daemons, so the prompt path never fired. The
+  structural argument above (we upgrade no shared libraries) is what the design
+  actually rests on; the env var is belt and braces. Re-test on a real Ubuntu
+  host when one is available.
+- **`sudo -n` refuses rather than prompting**, by choice. A sysadmin running
+  interactively as a normal user with password-gated sudo gets an explicit error,
+  not a password prompt.
 
 ## Migration order
 

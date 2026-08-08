@@ -15,7 +15,7 @@ Copied verbatim from `docs/design-spec.md`. Every task's requirements implicitly
 - **Build floor: Ubuntu 22.04** (glibc 2.35). Verified to run on 2.35 / 2.36 / 2.39 / 2.41.
 - **No venv, ever.** Vendor python-build-standalone; install into its own `site-packages`.
 - **`cp -aL`, never `cp -a`**, when materialising the interpreter — uv's managed dir is a symlink.
-- **Delete `lib/python3.12/EXTERNALLY-MANAGED`** from the vendored tree.
+- **Delete `lib/python<version>/EXTERNALLY-MANAGED`** from the vendored tree (version comes from `porter.yaml`, never hardcoded).
 - **`--break-system-packages`** on `uv pip install` into the vendored interpreter.
 - **`python -m <module>`, never `bin/` console scripts** — their shebangs are absolute build paths.
 - **Config is two files:** `/etc/<pkg>/defaults` (conffile, package-owned) and `/etc/<pkg>/env` (admin-owned, `postinst`-created if absent, **never** inside the `.deb`).
@@ -25,6 +25,11 @@ Copied verbatim from `docs/design-spec.md`. Every task's requirements implicitly
 - **The `Packages` index is emitted from `dpkg-deb --field`**, not `dpkg-scanpackages` (`dpkg-dev` is absent on demos).
 - **Never pipe a gate.** `cmd | tail` hands `&&` the exit code of `tail`. Read every `rc` directly.
 - **Every gate assertion carries a positive control or a magnitude check.**
+- **The install must complete unattended**: no prompt reachable, verified under `setsid` with stdin closed.
+- **`sudo -n` or an explicit refusal** — never block on a password prompt.
+- **Real env guards only:** `DEBIAN_FRONTEND=noninteractive`, `NEEDRESTART_MODE=a`, `UCF_FORCE_CONFOLD=1`, `-o Dpkg::Use-Pty=0`. **`NEEDRESTART_SUSPEND` does not exist** in needrestart 3.6 — measured; do not reintroduce it.
+- **`apt-get update` scoped to our own list file** so a client's broken network source cannot break an offline install.
+- **Static system user, never `DynamicUser=yes`** — the latter puts state in `/var/lib/private/<pkg>` (`700 root:root`), unreadable and unlistable by a non-root operator.
 - **English for everything porter produces**: code, comments, identifiers, log messages, CLI flags and help text, generated `install.sh` and `README.txt`, tests, docs, commits. porter ships no Spanish. A component may pass its own operator text in as data; porter never bakes a language in.
 
 ## File Structure
@@ -392,6 +397,21 @@ def test_postinst_creates_env_only_if_absent_and_never_prompts():
         assert interactive not in body, f"postinst must never prompt: found {interactive!r}"
 
 
+def test_unit_uses_a_static_user_not_dynamicuser():
+    """DynamicUser puts state in /var/lib/private/<pkg> at 700 root:root, which
+    a non-root operator cannot read or list. Measured 2026-08-07."""
+    u = unit("une-sigere-api", "SIGERE API", "/x/python3.12 -m uvicorn a:app", "/x")
+    assert "DynamicUser" not in u
+    assert "User=une-sigere-api" in u
+    assert "Group=une-sigere-api" in u
+
+
+def test_postinst_creates_the_system_user_and_restarts_on_upgrade():
+    body = env_postinst("une-sigere-api")
+    assert "useradd --system" in body
+    assert "try-restart" in body
+
+
 def test_unit_loads_defaults_then_env_so_admin_wins():
     u = unit("une-sigere-api", "SIGERE API", "/usr/lib/x/python/bin/python3.12 -m uvicorn a:app", "/usr/lib/x")
     lines = u.splitlines()
@@ -480,6 +500,11 @@ def env_postinst(pkg: str) -> str:
     return f"""#!/bin/sh
 set -e
 if [ "$1" = configure ]; then
+  # Static system user: stable UID across boots, so /var/lib/{pkg} keeps
+  # predictable ownership and a non-root operator can back it up.
+  getent group {pkg} >/dev/null || groupadd --system {pkg}
+  getent passwd {pkg} >/dev/null || useradd --system --gid {pkg} \
+      --no-create-home --shell /usr/sbin/nologin {pkg}
   mkdir -p /etc/{pkg}
   if [ ! -f /etc/{pkg}/env ]; then
     cp /usr/share/{pkg}/env.example /etc/{pkg}/env
@@ -487,6 +512,9 @@ if [ "$1" = configure ]; then
   fi
   systemctl daemon-reload || true
   systemctl enable {pkg}.service >/dev/null 2>&1 || true
+  # Restart on upgrade so the operator needs no follow-up command. try-restart
+  # is a no-op when the unit is not running, which is the fresh-install case.
+  systemctl try-restart {pkg}.service >/dev/null 2>&1 || true
 fi
 exit 0
 """
@@ -499,12 +527,20 @@ exit 0
 depends_on/service_healthy has no systemd equivalent; ordering is After=/
 Requires= plus Restart=on-failure convergence. That is a deliberate accepted
 behavioural change, recorded in docs/design-spec.md.
+
+NOT DynamicUser=yes. Measured 2026-08-07: it redirects StateDirectory to
+/var/lib/private/<pkg>, mode 700 root:root, which a non-root operator can
+neither read nor list -- so backups, monitoring and support all need root, and
+admin-dropped files silently change owner as the UID rotates. A static system
+user created in postinst gives a real /var/lib/<pkg> at 750 root:<pkg>, which
+passed every non-root access check the private layout failed.
 """
 from __future__ import annotations
 
 
 def unit(pkg: str, description: str, exec_start: str, workdir: str,
-         after: str = "network.target") -> str:
+         user: str | None = None, after: str = "network.target") -> str:
+    user = user or pkg
     return f"""[Unit]
 Description={description}
 After={after}
@@ -514,7 +550,8 @@ EnvironmentFile=/etc/{pkg}/defaults
 EnvironmentFile=-/etc/{pkg}/env
 WorkingDirectory={workdir}
 ExecStart={exec_start}
-DynamicUser=yes
+User={user}
+Group={user}
 StateDirectory={pkg}
 ProtectSystem=strict
 PrivateTmp=yes
@@ -527,7 +564,7 @@ WantedBy=multi-user.target
 """
 ```
 
-Note for the implementer: `/etc/<pkg>/env` is mode 600 root while the service runs under `DynamicUser=yes`. That works because systemd reads `EnvironmentFile` as root *before* dropping privileges — verified on demos 2026-08-07. Do not "fix" it by loosening the mode.
+Note for the implementer: `/etc/<pkg>/env` is mode 600 root, and the service runs as the unprivileged static user — which cannot read that file itself. It works anyway because systemd reads `EnvironmentFile` as root *before* dropping privileges (verified on demos 2026-08-07). Do not "fix" this by loosening the mode or by chowning the file to the service user.
 
 - [ ] **Step 4: Run the tests**
 
@@ -630,17 +667,50 @@ from pathlib import Path
 
 INSTALL_SH = """#!/usr/bin/env bash
 # Installs OR updates {app}. Same command either way -- dpkg knows which.
+#
+# Autonomous by construction: no prompt is reachable from here. There is no
+# interactive fallback on an airgapped client, so a script that can block is a
+# script that hangs invisibly at 3am.
 set -euo pipefail
 HERE="$(cd "$(dirname "$0")" && pwd)"
 VERSION=""
-[ "${{1:-}}" = "--version" ] && {{ VERSION="={{2}}"; shift 2; }}
-[ "$(id -u)" -eq 0 ] || {{ echo "Run as root: sudo bash $0" >&2; exit 1; }}
+while [ $# -gt 0 ]; do
+  case "$1" in
+    --yes|-y)   shift ;;                      # accepted and implied; never prompts
+    --version)  VERSION="={{2}}"; shift 2 ;;
+    *) echo "unknown flag: $1" >&2; exit 2 ;;
+  esac
+done
+
+# Lift to root without a password prompt, or say exactly why not. Blocking on a
+# password is indistinguishable from a hang in an unattended run.
+if [ "$(id -u)" -ne 0 ]; then
+  if sudo -n true 2>/dev/null; then exec sudo -n -E bash "$0" "$@"; fi
+  echo "ERROR: not root, and passwordless sudo is unavailable." >&2
+  echo "       Re-run as root:  sudo bash $0 $*" >&2
+  exit 1
+fi
+
+export DEBIAN_FRONTEND=noninteractive
+export NEEDRESTART_MODE=a      # auto-restart; never the whiptail service list.
+                               # NEEDRESTART_SUSPEND is NOT a real variable --
+                               # absent from needrestart 3.6's code (measured).
+export UCF_FORCE_CONFOLD=1
 
 echo "deb [trusted=yes] file:${{HERE}}/repo ./" > /etc/apt/sources.list.d/{app}.list
-apt-get update -o Dir::Etc::sourcelist="sources.list.d/{app}.list" \\
-                -o Dir::Etc::sourceparts="-" -o APT::Get::List-Cleanup="0" -qq
-apt-get install -y -qq --allow-downgrades "{app}${{VERSION}}"
-echo "OK: {app} installed. Edit /etc/{app}/env, then: systemctl restart {app}"
+# Scoped update: a client with a stale or unreachable source in sources.list.d/
+# must not be able to break an offline install. Verified with a broken source.
+apt-get update -qq \\
+  -o Dir::Etc::sourcelist="sources.list.d/{app}.list" \\
+  -o Dir::Etc::sourceparts="-" \\
+  -o APT::Get::List-Cleanup="0"
+apt-get install -y -qq --allow-downgrades \\
+  -o Dpkg::Options::=--force-confold \\
+  -o Dpkg::Options::=--force-confdef \\
+  -o Dpkg::Use-Pty=0 \\
+  "{app}${{VERSION}}"
+echo "INSTALL_OK {app}=$(dpkg-query -W -f='${{Version}}' {app})"
+echo "Next: edit /etc/{app}/env, then: systemctl restart {app}"
 """
 
 
@@ -808,7 +878,18 @@ def gate(usb: Path, app: str, image: str, health_url: str,
     script = f"""
 set -e
 rm -f /etc/apt/sources.list /etc/apt/sources.list.d/*.sources /etc/apt/sources.list.d/*.list 2>/dev/null
-bash /media/usb/install.sh --version {old} >/dev/null 2>&1
+# A stale unreachable source the client left behind. A scoped apt-get update
+# must step over it rather than failing the offline install.
+echo 'deb [trusted=yes] http://192.0.2.1/gone ./' > /etc/apt/sources.list.d/zz-broken.list
+
+# CONTROL for the unattended check: under this harness a bare `read` MUST fail.
+# Otherwise "no prompt reached" is satisfied by a harness that cannot detect one.
+if setsid bash -c 'read -r _' < /dev/null 2>/dev/null; then echo "TTYCTL=blind"; else echo "TTYCTL=ok"; fi
+
+# The install runs with NO controlling terminal and stdin closed.
+setsid bash /media/usb/install.sh --version {old} < /dev/null > /tmp/inst.log 2>&1
+grep -qiE 'what would you like|whiptail|EOF on stdin|Which services' /tmp/inst.log \
+  && echo "PROMPTED=yes" || echo "PROMPTED=no"
 echo "INSTALLED=$(dpkg-query -W -f='${{Version}}' {app})"
 
 # Magnitude check: a truncated payload installs cleanly and is useless.
@@ -844,6 +925,10 @@ grep -qiE 'pip install|apt-get install .*http|Downloading' /var/log/apt/term.log
             "upgrade destroyed client state: " + ", ".join(
                 l for l in out.splitlines() if l.startswith("LOST ")))
     r.check("CONTROL=ok" in out, "health probe is blind -- its verdict proves nothing")
+    r.check("PROMPTED=no" in out, "a prompt was reachable during the install")
+    r.check("TTYCTL=ok" in out,
+            "the no-TTY harness did not block an interactive read -- "
+            "'no prompt reached' would prove nothing")
     r.check("HEALTH=ok" in out, "service did not answer after upgrade")
     r.check("FETCHED=no" in out, "bundle attempted a network fetch")
 
@@ -885,7 +970,14 @@ git commit -m "feat(gate): prove bundles offline, with controls and mutation tes
 # repos/une-tools/porter.yaml
 # Derived from deploy/release/sigere-api/{requirements.txt,env.example,Makefile}.
 build_floor: ubuntu:22.04
-python: "3.12"
+
+# The interpreter this project needs. porter hardcodes neither the version nor
+# a package name -- `bundled` puts it inside each component's own .deb, which is
+# what slice 1 implements. A project with several components declares a shared
+# package name here instead, and porter emits it as its own .deb.
+python:
+  version: "3.12"
+  package: bundled
 
 components:
   - name: sigere-api
@@ -923,8 +1015,14 @@ from porter.spec import load
 FIXTURE = Path(__file__).parent / "fixtures/porter.yaml"
 
 
+def test_python_block_is_project_declared_not_hardcoded():
+    python, _ = load(FIXTURE)
+    assert python.version == "3.12"
+    assert python.bundled, "slice 1 ships a bundled interpreter"
+
+
 def test_loads_the_sigere_component():
-    comps = load(FIXTURE)
+    _, comps = load(FIXTURE)
     assert len(comps) == 1
     c = comps[0]
     assert c.package == "une-sigere-api"
@@ -961,6 +1059,22 @@ import yaml
 
 
 @dataclass
+class Python:
+    """Which interpreter this project ships, and how.
+
+    porter hardcodes neither a version nor a package name. `package` is either
+    the literal "bundled" (interpreter inside each component's .deb) or the name
+    of a separate interpreter package the project chooses.
+    """
+    version: str
+    package: str = "bundled"
+
+    @property
+    def bundled(self) -> bool:
+        return self.package == "bundled"
+
+
+@dataclass
 class Component:
     name: str
     package: str
@@ -974,8 +1088,11 @@ class Component:
     health: str = "/health"
 
 
-def load(path: Path) -> list[Component]:
+def load(path: Path) -> tuple[Python, list[Component]]:
     doc = yaml.safe_load(Path(path).read_text())
+    python = Python(**doc["python"])
+    if python.package != "bundled" and not python.package.strip():
+        raise ValueError("python.package must be 'bundled' or a package name")
     out = []
     for raw in doc["components"]:
         overlap = set(raw.get("defaults", {})) & set(raw.get("admin_keys", []))
@@ -983,7 +1100,7 @@ def load(path: Path) -> list[Component]:
             raise ValueError(
                 f"{raw['package']}: {sorted(overlap)} declared in both defaults and admin_keys")
         out.append(Component(**raw))
-    return out
+    return python, out
 ```
 
 ```python
@@ -1001,8 +1118,9 @@ app = App(name="porter", help="Build airgapped .deb installers")
 @app.command
 def build(config: str = "porter.yaml", out: str = "dist"):
     """Bake, assemble, lint and package every component in the config."""
-    for component in load(Path(config)):
-        print(f"building {component.package}")
+    python, components = load(Path(config))
+    for component in components:
+        print(f"building {component.package} (python {python.version}, {python.package})")
     # Wired to interpreter.vendor -> interpreter.install -> deb.build_deb
     # in this task; see docs/plans/2026-08-07-slice-1-sigere-api.md.
 
@@ -1023,7 +1141,7 @@ uv run --project ../porter porter publish --out /tmp/une-usb
 uv run --project ../porter porter gate --usb /tmp/une-usb --app une-sigere-api
 ```
 
-Expected: the gate reports green, and `du -sh dist/une-sigere-api_*.deb` is in the tens of MB (the component's three real dependencies measured 42 MB; adding the 97 MB interpreter puts the first package near 140 MB, which drops to ~42 MB once `syalia-python3.12` is split out as its own package in slice 2).
+Expected: the gate reports green, and `du -sh dist/une-sigere-api_*.deb` is around 140 MB — the component's three real dependencies measured 42 MB, plus the 97 MB bundled interpreter. Slice 1 uses `python.package: bundled`; a project that later declares a shared interpreter package drops this to ~42 MB.
 
 - [ ] **Step 6: Commit**
 
@@ -1041,7 +1159,7 @@ git commit -m "feat(release): declare sigere-api as a porter component"
 
 Named so they are decisions, not omissions:
 
-- **The shared `syalia-python3.12` package.** Slice 1 vendors the interpreter *inside* `une-sigere-api` (~97 MB of duplication the moment a second component exists). Splitting it out is slice 2, once there are two consumers to prove the `Depends:` actually works.
+- **`python.package: shared`.** Slice 1 only implements `bundled`, which vendors the interpreter inside `une-sigere-api` (~97 MB duplicated the moment a second component exists). Emitting a separate interpreter package — named by the project, not by porter — is slice 2, once there are two consumers to prove the `Depends:` actually resolves offline.
 - **`<app>-setup`**, the interactive first-run wizard. Slice 1 seeds `/etc/<pkg>/env` with empty placeholders; the sysadmin edits it by hand, exactly as today.
 - **`systemd-nspawn` gating.** Task 5 gates in Docker with `--network none`, which proves the payload, the upgrade and client-state survival but *not* the unit under real systemd. nspawn arrives with slice 2.
 - **GPG signing** of the repo (`[trusted=yes]` for now), the bwrap sandbox, and metapackages for UNE's two machines.
