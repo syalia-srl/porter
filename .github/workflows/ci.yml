@@ -1,0 +1,81 @@
+name: ci
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+  workflow_dispatch:
+
+# A green run here must mean the suite actually ran. Both PORTER_REQUIRE_* gates
+# are ON: without them, missing `uv` or a missing docker daemon turns most of the
+# suite into skips and pytest still exits 0 -- a green badge over a suite that
+# tested almost nothing. That is the exact failure porter exists to prevent, so
+# it is not tolerable in porter's own CI.
+env:
+  PORTER_REQUIRE_UV: "1"
+  PORTER_REQUIRE_DOCKER: "1"
+
+jobs:
+  tests:
+    runs-on: ubuntu-latest
+    timeout-minutes: 25
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Install uv
+        uses: astral-sh/setup-uv@v5
+        with:
+          enable-cache: true
+
+      # The suite vendors a python-build-standalone tree (~97 MB unpacked) and
+      # builds .deb packages, so it needs real disk and a working dpkg-deb.
+      # ubuntu-latest has dpkg-deb; assert it rather than discovering it midway.
+      - name: Preconditions
+        run: |
+          set -euo pipefail
+          command -v dpkg-deb >/dev/null || { echo "dpkg-deb missing"; exit 1; }
+          docker version --format '{{.Server.Version}}'
+          df -h / | tail -1
+
+      - name: Test suite
+        run: uv run --extra dev pytest -v --durations=10
+
+      # The gate that matters: every guard is disabled at its use site in turn
+      # and the suite must go red. A guard whose test cannot fail licenses
+      # shipping. This is slower than the suite it wraps -- that is the point.
+      - name: Guards still bite
+        run: bash scripts/reverify-guards.sh
+
+      # Advisory, not a gate: three pre-existing findings predate this workflow
+      # and nobody has decided them. Deliberately not silenced either -- the
+      # output lands in the log so the decision stays visible.
+      - name: Lint (advisory)
+        run: uv run --extra dev ruff check . || true
+
+  # Proves the claim the whole design rests on: one build on the glibc floor runs
+  # on every supported target. Cheap to run, and the failure it catches (a
+  # too-new build host) is invisible on the machine that produced it.
+  glibc-floor:
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+    steps:
+      - uses: actions/checkout@v4
+      - uses: astral-sh/setup-uv@v5
+        with:
+          enable-cache: true
+      - name: Vendor an interpreter on the floor and run it on newer targets
+        run: |
+          set -euo pipefail
+          uv run --extra dev python -c "
+          from pathlib import Path
+          from porter.interpreter import vendor, install
+          b = vendor(Path('/tmp/floor'))
+          install(b, ['idna'])
+          print('vendored:', b)
+          "
+          for img in ubuntu:22.04 debian:12 ubuntu:24.04 debian:13; do
+            echo \"-- $img --\"
+            docker run --rm --network none -v /tmp/floor:/floor:ro "$img" \
+              /floor/python/bin/python3.12 -c \
+              "import idna, sys; print(sys.version.split()[0], 'idna ok')"
+          done
