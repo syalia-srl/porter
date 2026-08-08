@@ -1,0 +1,63 @@
+# The gallery's desktop entry: one manifest, TWO packages.
+#
+#   porter-example-desktop           the service. No GUI dependency anywhere.
+#   porter-example-desktop-desktop   the launcher, the app-menu entry, the icon.
+#
+# That split is rule 12 and it is the whole point of this example. A GUI needs
+# GTK, X11 and NSS from the client; apt cannot fetch them on an airgapped box.
+# A desktop dependency in the core package therefore does not degrade a headless
+# server install -- it makes it impossible. `tests/test_desktop_e2e.py` installs
+# the core package on a bare Debian image that has neither curl nor xdg-utils,
+# and then shows the desktop package being refused on that same image: without
+# the second half, the first proves nothing.
+
+package: porter-example-desktop
+version: "1.0"
+description: porter's example desktop application
+maintainer: porter <porter@example.com>
+architecture: amd64
+
+kind: service
+
+source:
+  - src/app.py
+
+python:
+  version: "3.12"
+  package: bundled
+
+requirements:
+  - fastapi
+  - uvicorn
+
+exec:
+  module: uvicorn
+  args: ["app:app", "--host", "127.0.0.1", "--port", "${PORT}"]
+
+# Package-owned and nothing else: this example has no secret for the admin to
+# fill in, so it ships no `admin_keys` and no `<pkg>-setup` wizard.
+env:
+  PORT: "9200"
+
+# The optional near-native shape. A manifest that omits this block gets one
+# package and no launcher -- which is every other entry in the gallery.
+desktop:
+  # The human name, and the X11 WM_CLASS. One token: it is passed to the
+  # browser as --class= and written into the .desktop entry as StartupWMClass=,
+  # and the two must agree or the window never groups under its own icon.
+  name: PorterDemo
+  # Relative to this file. Staged into the hicolor directory matching its own
+  # IHDR, never one named here.
+  icon: assets/icon.png
+  # What the window opens. The port is checked against `env.PORT` above at build
+  # time, because the drift that actually happens is an author bumping one and
+  # forgetting the other. An admin who edits PORT in /etc/<pkg>/env after
+  # installation is NOT covered -- the URL is baked at build time.
+  url: http://127.0.0.1:9200
+  # Waited on before the window opens, so a click right after login does not
+  # land on connection-refused while systemd is still starting the stack.
+  health: /health
+  # Probe whatever the client already has (Chrome, Chromium, Brave, Edge) and
+  # fall back to xdg-open. `bundled` is refused for 0.1.0: pinning a browser is
+  # a third-party artefact whose licence terms porter has not verified.
+  browser: system

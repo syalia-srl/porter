@@ -46,6 +46,7 @@ from dataclasses import dataclass
 from pathlib import Path
 
 from porter.config import env_postinst, setup_script, split
+from porter.depends import derive_depends
 from porter.interpreter import install, vendor
 from porter.systemd import resolve_ordering, timer, unit
 from porter.types import Component, Python
@@ -571,5 +572,15 @@ def assemble(component: Component, python: Python,
         "Maintainer": component.maintainer,
         "Description": component.description,
     }
+    # Rule 11: derived from the ELF headers of what is actually staged, never
+    # hand-written. The vendored interpreter is a bundled native tree, and its
+    # `_crypt` extension links libcrypt.so.1 -- a dependency nothing in the
+    # manifest names and nobody writing the list by hand would include. Set only
+    # when there is something to declare, so a payload with no native code
+    # ships no empty field. `derive_depends` refuses rather than shortens: an
+    # object it cannot read is not an object with no dependencies.
+    depends = derive_depends(stage)
+    if depends:
+        control["Depends"] = ", ".join(depends)
     return Staged(stage=stage, conffiles=_conffiles(stage),
                   control=control, scripts=scripts)
