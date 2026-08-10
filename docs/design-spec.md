@@ -2,7 +2,7 @@
 date: 2026-08-07
 type: architecture
 tags: [airgap, deployment, packaging, deb, porter]
-status: design — approved in conversation 2026-08-07; implementation plan not yet written
+status: implemented — released as v0.1.0 on 2026-08-10 (fdd2282). Plans in docs/plans/; what shipped and what did not is in CHANGELOG.md
 supersedes: partially supersedes 2026-07-23-airgapped-appliance-pattern.md ("Docker is assumed")
 ---
 

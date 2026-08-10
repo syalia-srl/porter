@@ -1,5 +1,10 @@
 # porter Slice 1 — the example gallery
 
+> **Status: executed.** Tasks 1–8 all landed; the work shipped in v0.1.0
+> (2026-08-10). The checkboxes below were never ticked during execution and are
+> left as written — `CHANGELOG.md` and `AGENTS.md`'s *State* section are the
+> authority on what is actually true, not this list.
+
 > **For agentic workers:** REQUIRED SUB-SKILL: Use superpowers:subagent-driven-development (recommended) or superpowers:executing-plans to implement this plan task-by-task. Steps use checkbox (`- [ ]`) syntax for tracking.
 
 **Goal:** porter builds, gates and publishes a gallery of in-repo example projects covering every packaging shape we care about — a FastAPI service, a plain command, a scheduled oneshot, a multi-component suite, and a near-native desktop app — each installable and upgradable on an airgapped Debian-family box with no Docker and no system Python.
