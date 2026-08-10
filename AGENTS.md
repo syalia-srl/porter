@@ -108,7 +108,7 @@ Spanish-speaking is still an English tool.
 
 ```bash
 PORTER_REQUIRE_UV=1 PORTER_REQUIRE_DOCKER=1 PORTER_REQUIRE_SYSTEMD=1 \
-  uv run --extra dev pytest
+  PORTER_REQUIRE_CC=1 PORTER_REQUIRE_NSPAWN=1 uv run --extra dev pytest
 ```
 
 **Always set `PORTER_REQUIRE_UV=1`.** Most of the suite needs `uv` on PATH to
@@ -137,9 +137,21 @@ is proved against a *real* compiled object — the point of the feature is that
 the ELF header is read rather than described — so on a host with no C compiler
 every test covering rule 11's derivation skips, and a skipped test is green.
 
-**All four CI-armed.** They are in `.github/workflows/ci.yml`'s `env:` block.
-Adding a fifth such variable means adding it there too, or the gate can go
+**`PORTER_REQUIRE_NSPAWN=1` is the fifth**, added with Task 14. The nspawn gate
+holds the only tests in porter that *start* a unit with systemd, and
+`systemd-nspawn` is not on a runner by default — it lives in `systemd-container`
+— so without the variable the one check that the hardening is real would be a
+skip, which is green. It was armed on a **measurement** and not a hope: 33 s end
+to end on `ubuntu-latest` with `systemd-container` installed. Arming a gate that
+cannot be satisfied turns every run red for a reason unrelated to the change
+under test, which is its own kind of uninformative.
+
+**All five CI-armed.** They are in `.github/workflows/ci.yml`'s `env:` block.
+Adding a sixth such variable means adding it there too, or the gate can go
 green having skipped exactly the thing the variable exists to force.
+Note `scripts/reverify-guards.sh` sets only the first three explicitly and
+inherits the rest from the environment — which is why CI's workflow-level
+`env:` block is what makes the sharded guard run honest.
 
 **Purge `__pycache__` after any edit-run-restore cycle** (mutation testing, a
 bisect, a quick experiment). CPython invalidates bytecode on source mtime *and
@@ -161,11 +173,20 @@ clean tree. `find src tests -name __pycache__ -type d -exec rm -rf {} +`.
 
 | Doc | When to reach for it |
 |---|---|
-| `know-how/mutation-testing-a-guard.md` | You added or changed a guard and must show it bites; or you are reviewing someone else's mutation evidence; or you are cutting a release. Carries the four traps that have cost real time here. |
+| `know-how/mutation-testing-a-guard.md` | You added or changed a guard and must show it bites; or you are reviewing someone else's mutation evidence; or you are cutting a release. Carries the five traps that have cost real time here. |
+| `know-how/baking-a-sqlite-payload.md` | A package's payload includes a SQLite database built by a `bake:` step — a corpus, a search index, a beaver store. Also when a client reports empty results, missing recent rows or `attempt to write a readonly database`, none of which reproduce on the build host. |
 
 ## State
 
-**Slice 1 in progress** — `docs/plans/2026-08-07-slice-1-example-gallery.md`.
+**Slice 1 complete — released as 0.1.0 on 2026-08-10.**
+Plan: `docs/plans/2026-08-07-slice-1-example-gallery.md`. What the release is,
+and explicitly is not, is in `CHANGELOG.md`; read that before believing any
+capability claim below is complete.
+
+**345 tests, 168 guard entries, 11 gallery examples**, all five
+`PORTER_REQUIRE_*` variables armed in CI. `porter build` is the only CLI verb;
+`usb_tree`/`write_index`/`sign_release`/`gate`/`nspawn_gate` are the library
+API — see *Not in 0.1.0*.
 
 - **Task 1 done:** `src/porter/interpreter.py` — `vendor()` materialises a
   relocatable python-build-standalone tree; `install()` puts packages in its own
@@ -248,11 +269,17 @@ clean tree. `find src tests -name __pycache__ -type d -exec rm -rf {} +`.
   run exactly once, plus `<pkg>-setup`), and `systemd.py` ordering (`after:` →
   `After=`/`Requires=`, cycles refused) with `kind: oneshot` (`Type=oneshot`, a
   `.timer`, the timer enabled rather than the service).
-- **The gallery is five examples:** `service-fastapi`, `baked-data`,
-  `stateful-service`, `oneshot-timer`, `multi-service` (3 components → 3 `.deb`s).
-  Each builds from a clean tree. `examples/command` is still owed.
-- **156 tests, 67 guard entries.** Run `scripts/reverify-guards.sh` before a
-  release; it isolates itself in a worktree and takes ~9 minutes.
+- **The gallery is eleven examples:** `service-fastapi`, `command`,
+  `oneshot-timer`, `stateful-service`, `baked-data`, `multi-service`, `suite`,
+  `shared-interpreter`, `native-binary`, `desktop-app`, `custom-build`. Each
+  builds from a clean tree — verified again 2026-08-10, 21 `.deb`s with
+  `rm -rf build dist` between every one (22 counting
+  `stateful-service/porter-previous.yaml`, the v_prev half of that example).
+  The gallery *is* the schema: a field no example exercises does not exist.
+- **Run `scripts/reverify-guards.sh` before a release.** In one process the 168
+  entries measured 4111 s and timed out; CI shards it six ways, and
+  `--check-patterns` catches the whole dead-pattern class in about a second
+  before a runner is spent on it.
 - **Tasks 5–8 and 12 done:** the USB apt repo and autonomous `install.sh`, the
   Docker gate with mutation bundles, `Depends:` from ELF headers, the
   `<app>-desktop` split, and the `build:` escape hatch. Nine examples build.
@@ -276,21 +303,30 @@ clean tree. `find src tests -name __pycache__ -type d -exec rm -rf {} +`.
   (3 `.deb`s: interpreter + service + command) and `examples/native-binary`
   (a `cc`-built program beside its own private `.so`) are the gallery entries;
   `PORTER_REQUIRE_CC=1` is the fourth armed variable.
-- **Next:** Tasks 14 (nspawn gate, repo signing) and 15 (release).
-
-- **Next:** the nspawn gate, which is where the emitted unit is
-  finally *started* by systemd. Nothing so far has run one. What *is* exercised:
-  the container e2e reads `ExecStart=` and `WorkingDirectory=` out of the
-  **installed unit file** and runs the first from the second, with a positive
-  control showing the same ExecStart does not answer from `/` — so
-  `WorkingDirectory=` is proven to be what puts the app on `sys.path`. What is
-  **not** exercised, and is entirely Task 4's: systemd itself running that line
-  — `User=`/`Group=` resolving to the postinst's static user, `StateDirectory=`
-  creating `/var/lib/<pkg>` at `750 root:<pkg>`, `ProtectSystem=strict` not
-  breaking the service, `Restart=on-failure`, and systemd's root-then-drop read
-  of `EnvironmentFile`. Those are asserted only as text today (presence and
-  section by `test_unit_carries_the_hardening_...`, spelling by
-  `systemd-analyze verify`, which parses but does not run).
+- **Task 14 done:** the **nspawn gate** and repo signing. This is where the
+  emitted unit is finally *started* by systemd, and it closes the limit that
+  stood for the whole of Slice 1. `nspawn_gate()` boots the target rootfs with
+  systemd as PID 1, installs the real `.deb`, starts the unit, and reads back
+  what systemd **loaded** rather than what porter wrote: `User=` off the main
+  PID's uid, `StateDirectory=` off the directory systemd created for the unit,
+  `Restart=on-failure` off `NRestarts` climbing after a kill, and
+  `ProtectSystem=strict` off a `systemd-run` positive control proving the
+  directive has teeth on this kernel. `PORTER_REQUIRE_NSPAWN=1` is the fifth
+  armed variable, and it was armed on a **measurement** — 33 s end to end on
+  `ubuntu-latest` — rather than on a hope, because a gate that cannot be
+  satisfied turns every run red for a reason unrelated to the change under test.
+  The container gate keeps its own job: it reads `ExecStart=` and
+  `WorkingDirectory=` out of the installed unit and runs the first from the
+  second, with a control showing the same ExecStart does *not* answer from `/`,
+  so `WorkingDirectory=` is proven to be what puts the app on `sys.path`.
+- **Task 15 done:** CI green on `main`, and 0.1.0 cut. The red was **not** the
+  `t64` rename: `ldconfig -p` and dpkg disagree about `/lib` vs `/usr/lib` on
+  ubuntu 24.04 and debian 13 (they agree on 22.04, debian 12 and 26.04), and
+  `dpkg -S` matches only the string it recorded — so porter could derive
+  `Depends:` on its build floor and on the newest release and refused *every*
+  package on the two in between. `packages_owning` now asks in both spellings.
+  Read that as the standing warning it is: **zion is 26.04 and `ubuntu-latest`
+  is 24.04, so a green local suite is not evidence about the runner.**
 
 The `porter.yaml` schema is defined by the example gallery: each example is a
 manifest that must parse and build, so a field with no example exercising it does

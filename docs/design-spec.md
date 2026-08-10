@@ -506,14 +506,19 @@ shape, and it needs nothing from porter beyond the above.
 
 Named rather than resolved, with the evidence that exists:
 
-- **No systemd unit has ever been *started* by systemd.** `User=`,
-  `StateDirectory=`, `ProtectSystem=strict`, `Restart=on-failure` and the rest
-  are, as of 2026-08-08, text assertions on the emitted file plus
-  `systemd-analyze verify`. The end-to-end tests run the service by invoking its
-  command line in a container, which has no PID 1 systemd. So the *unit* is
-  syntactically valid and the *program* runs; that the two compose has not been
-  demonstrated. The nspawn gate exists for exactly this and must not assume
-  otherwise.
+- ~~**No systemd unit has ever been *started* by systemd.**~~ **Closed
+  2026-08-08 by the nspawn gate** (Task 14), and the entry is struck rather than
+  deleted because it stood for the whole of Slice 1 and the shape of what
+  replaced it is the point. `nspawn_gate()` boots the target rootfs with systemd
+  as PID 1, installs the real `.deb`, starts the unit, and reads back what
+  systemd *loaded* rather than what porter wrote: `User=` proven by the main
+  PID's actual uid, `StateDirectory=` by the directory systemd created for the
+  unit, `Restart=on-failure` by killing the process and watching `NRestarts`
+  climb, and `ProtectSystem=strict` by a `systemd-run` positive control that
+  shows the directive has teeth on *this* kernel. It runs in CI with
+  `PORTER_REQUIRE_NSPAWN=1`, so it cannot silently skip. What remains untested
+  is the *client's own hardware and kernel*: nspawn shares the host kernel, so a
+  client whose kernel lacks a namespace feature would be a different result.
 - **Mutation evidence has a silent invalidation path, now mitigated.** CPython
   invalidates `.pyc` on source mtime *and* size, so an equal-length edit reverted
   inside the same second leaves stale bytecode that Python considers current — a
@@ -521,10 +526,12 @@ Named rather than resolved, with the evidence that exists:
   during Task 3, after which every guard in Tasks 1–2 was re-verified with caches
   purged and all still bite. `scripts/reverify-guards.sh` is the standing check;
   a guard with no entry there is unverified.
-- **The build host has a disk ceiling.** zion's `/` sits at 98% with
-  `/var/lib/docker` on it and nothing safely reclaimable. A test run has already
-  hit 100% mid-suite and produced a `dpkg-deb` broken pipe. Work needing real
-  disk — bundled native binaries, an nspawn rootfs — belongs on a host with room.
+- **The build host has a disk ceiling.** zion's `/` carries `/var/lib/docker`
+  and sits in the 90s; a test run has already hit 100% mid-suite and produced a
+  `dpkg-deb` broken pipe. `docker builder prune` is the one lever that reliably
+  gives a few GB back (3.9 GB on 2026-08-10); images and volumes are not safely
+  reclaimable. Work needing real disk — bundled native binaries, an nspawn
+  rootfs — belongs on a host with room.
 - **`slirp4netns` egress is unproven.** Only the isolation direction was tested
   (host `127.0.0.1` unreachable from the sandbox netns — the security-relevant
   half). The "egress on, but cannot see ainbox services" case is the fiddly one.
@@ -575,11 +582,18 @@ starts by copying a working example rather than reading a schema:
 | HTTP service, systemd unit, split config | `examples/service-fastapi` |
 | CLI tool, no service | `examples/command` |
 | scheduled job | `examples/oneshot-timer` |
-| several components, one install per machine | `examples/suite` |
+| client-owned state, migrated across an upgrade | `examples/stateful-service` |
+| a payload built before packaging (corpus, index, model) | `examples/baked-data` |
+| several components with start-up ordering | `examples/multi-service` |
+| several components, one install per machine role | `examples/suite` |
+| one interpreter shared by every component | `examples/shared-interpreter` |
+| compiled payload, `Depends:` from ELF headers | `examples/native-binary` |
 | near-native desktop app | `examples/desktop-app` |
+| a shape the schema cannot express at all | `examples/custom-build` |
 
-If a repo's shape is missing from that table, the gap is porter's to close —
-that, and only that, is what a consumer's needs create here.
+Eleven as of 0.1.0, each building from a clean tree. If a repo's shape is
+missing from that table, the gap is porter's to close — that, and only that, is
+what a consumer's needs create here.
 
 ## See also
 
