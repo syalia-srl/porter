@@ -167,6 +167,7 @@ clean tree. `find src tests -name __pycache__ -type d -exec rm -rf {} +`.
 |---|---|
 | `docs/design-spec.md` | The design, with the measurements behind each decision. Canonical. |
 | `docs/2026-08-10-removal-path-design.md` | The removal path — `prerm`/`postrm`, purge semantics, `uninstall.sh`. Extends the spec, which covers install/configure/update and is silent on removal. Approved, not yet implemented. |
+| `docs/2026-08-10-build-floor-design.md` | Where a package is built and how its `Depends:` are proven to resolve on each target. Makes `build_floor:` real — today the "build on the floor" rule is enforced by nothing. Approved, not yet implemented. |
 | `docs/plans/` | Implementation plans, one per slice. |
 | `know-how/` | Procedure docs. Match the task against each *when to reach for it* line. |
 
