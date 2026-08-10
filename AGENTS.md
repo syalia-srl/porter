@@ -166,6 +166,7 @@ clean tree. `find src tests -name __pycache__ -type d -exec rm -rf {} +`.
 | Path | What it is |
 |---|---|
 | `docs/design-spec.md` | The design, with the measurements behind each decision. Canonical. |
+| `docs/2026-08-10-removal-path-design.md` | The removal path — `prerm`/`postrm`, purge semantics, `uninstall.sh`. Extends the spec, which covers install/configure/update and is silent on removal. Approved, not yet implemented. |
 | `docs/plans/` | Implementation plans, one per slice. |
 | `know-how/` | Procedure docs. Match the task against each *when to reach for it* line. |
 
