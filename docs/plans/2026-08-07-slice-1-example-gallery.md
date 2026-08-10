@@ -1,9 +1,32 @@
 # porter Slice 1 — the example gallery
 
-> **Status: executed.** Tasks 1–8 all landed; the work shipped in v0.1.0
-> (2026-08-10). The checkboxes below were never ticked during execution and are
-> left as written — `CHANGELOG.md` and `AGENTS.md`'s *State* section are the
-> authority on what is actually true, not this list.
+> **Status: executed.** Tasks 1–8 all landed, each with the commit its Step 5
+> names (`97ea3d5`, `186c8d6`, `b84d7f8`, `42b31c2`, `2eb3a2b`, `7fa2c0d`,
+> `d2f3282`), and the work shipped in v0.1.0 on 2026-08-10. The boxes were
+> ticked retroactively on 2026-08-10 against the tree, not during execution.
+>
+> **Two places the tree deliberately diverges from the prose below.** The plan
+> prescribes implementations; the implementers overrode several, which slice 2
+> then made policy ("prefer properties over prescribed implementations" — its
+> Global Constraints say slice 1's most detailed prescriptions are exactly where
+> its bugs came from).
+>
+> - **`porter gate` and `porter publish` are not CLI verbs.** Task 8's Step 5
+>   invokes them; 0.1.0 ships `porter build` as the only verb, and `gate()`,
+>   `nspawn_gate()`, `usb_tree()`, `write_index()` and `sign_release()` are the
+>   library API, driven by `tests/test_gate.py`, `test_repo.py`,
+>   `test_nspawn_gate.py` and `test_signing.py`. The *properties* Step 5 asks
+>   for are proved — `tests/test_desktop_e2e.py` asserts the core package
+>   installs on a headless image where the desktop package's dependencies are
+>   absent, and that the desktop package is refused on that same image. See
+>   *Not in 0.1.0* in `CHANGELOG.md` for why they are not verbs.
+> - **The Python blocks are illustrative, not what shipped.** `spec.py` in
+>   particular grew a different schema (roles, an `exec` block, unknown-key and
+>   missing-key refusals) and carries no "declared in both defaults and
+>   admin_keys" check; `tests/test_spec.py` is not the file drafted here.
+>
+> `CHANGELOG.md` and `AGENTS.md`'s *State* section remain the authority on what
+> is true today.
 
 > **For agentic workers:** REQUIRED SUB-SKILL: Use superpowers:subagent-driven-development (recommended) or superpowers:executing-plans to implement this plan task-by-task. Steps use checkbox (`- [ ]`) syntax for tracking.
 
@@ -72,7 +95,7 @@ Copied verbatim from `docs/design-spec.md`. Every task's requirements implicitly
 **Interfaces:**
 - Produces: `vendor(dest: Path, version: str = "3.12") -> Path` — materialises `dest/python`, returns the interpreter binary path (`dest/python/bin/python3.12`). `install(python_bin: Path, requirements: list[str], constraints: Path | None = None) -> None`.
 
-- [ ] **Step 1: Write the failing tests**
+- [x] **Step 1: Write the failing tests**
 
 ```python
 # tests/test_interpreter.py
@@ -135,12 +158,12 @@ def vendored(tmp_path_factory) -> Path:
     return dest
 ```
 
-- [ ] **Step 2: Run tests to verify they fail**
+- [x] **Step 2: Run tests to verify they fail**
 
 Run: `uv run pytest tests/test_interpreter.py -v`
 Expected: FAIL — `ModuleNotFoundError: No module named 'porter.interpreter'`
 
-- [ ] **Step 3: Write the implementation**
+- [x] **Step 3: Write the implementation**
 
 ```python
 # src/porter/interpreter.py
@@ -204,12 +227,12 @@ def install(python_bin: Path, requirements: list[str], constraints: Path | None 
     _run(cmd)
 ```
 
-- [ ] **Step 4: Run tests to verify they pass**
+- [x] **Step 4: Run tests to verify they pass**
 
 Run: `uv run pytest tests/test_interpreter.py -v`
 Expected: 5 passed
 
-- [ ] **Step 5: Commit**
+- [x] **Step 5: Commit**
 
 ```bash
 git add src/porter/interpreter.py tests/test_interpreter.py tests/conftest.py
@@ -228,7 +251,7 @@ git commit -m "feat(interpreter): vendor a relocatable CPython without a venv"
 - Consumes: nothing from Task 1.
 - Produces: `build_deb(stage: Path, control: dict[str, str], out_dir: Path, conffiles: list[str] = (), scripts: dict[str, str] = None) -> Path`. `scripts` keys are `postinst` / `prerm` / `postrm`. Returns the written `.deb` path.
 
-- [ ] **Step 1: Write the failing tests**
+- [x] **Step 1: Write the failing tests**
 
 ```python
 # tests/test_deb.py
@@ -291,12 +314,12 @@ def test_refuses_a_stage_carrying_an_env_file(tmp_path):
         build_deb(stage, CONTROL, tmp_path)
 ```
 
-- [ ] **Step 2: Run tests to verify they fail**
+- [x] **Step 2: Run tests to verify they fail**
 
 Run: `uv run pytest tests/test_deb.py -v`
 Expected: FAIL — `ModuleNotFoundError: No module named 'porter.deb'`
 
-- [ ] **Step 3: Write the implementation**
+- [x] **Step 3: Write the implementation**
 
 ```python
 # src/porter/deb.py
@@ -363,12 +386,12 @@ def build_deb(stage: Path, control: dict[str, str], out_dir: Path,
     return out
 ```
 
-- [ ] **Step 4: Run tests to verify they pass**
+- [x] **Step 4: Run tests to verify they pass**
 
 Run: `uv run pytest tests/test_deb.py -v`
 Expected: 4 passed
 
-- [ ] **Step 5: Commit**
+- [x] **Step 5: Commit**
 
 ```bash
 git add src/porter/deb.py tests/test_deb.py
@@ -394,7 +417,7 @@ fixture every later task reuses.
 - Consumes: `build_deb` (Task 2), `vendor`/`install` (Task 1).
 - Produces: `split(template: dict[str, str], admin_keys: list[str]) -> tuple[str, str]` returning `(defaults_body, env_body)`. `env_postinst(pkg: str) -> str`. `unit(pkg: str, description: str, exec_start: str, workdir: str) -> str`.
 
-- [ ] **Step 1: Write the failing tests**
+- [x] **Step 1: Write the failing tests**
 
 ```python
 # tests/test_config.py
@@ -487,12 +510,12 @@ def test_installed_service_answers_and_admin_env_overrides(built_demo_deb, docke
     assert '"tuning":"from-defaults"' in proc.stdout, proc.stdout
 ```
 
-- [ ] **Step 2: Run tests to verify they fail**
+- [x] **Step 2: Run tests to verify they fail**
 
 Run: `uv run pytest tests/test_config.py -v`
 Expected: FAIL — `ModuleNotFoundError: No module named 'porter.config'`
 
-- [ ] **Step 3: Write the implementation**
+- [x] **Step 3: Write the implementation**
 
 ```python
 # src/porter/config.py
@@ -601,14 +624,14 @@ WantedBy=multi-user.target
 
 Note for the implementer: `/etc/<pkg>/env` is mode 600 root, and the service runs as the unprivileged static user — which cannot read that file itself. It works anyway because systemd reads `EnvironmentFile` as root *before* dropping privileges (verified on demos 2026-08-07). Do not "fix" this by loosening the mode or by chowning the file to the service user.
 
-- [ ] **Step 4: Run the tests**
+- [x] **Step 4: Run the tests**
 
 Run: `uv run pytest tests/test_config.py -v` → 4 passed
 Then write `examples/service-fastapi/src/app.py` as a FastAPI app returning `{"greeting": os.environ["GREETING"], "tuning": os.environ["TUNING"]}`, with `TUNING=from-defaults` in `defaults` and `GREETING` as the sole entry in `admin_keys`; add the `built_demo_deb` / `docker_image` fixtures to `tests/conftest.py` that build it. Then run:
 Run: `uv run pytest tests/test_service_e2e.py -v -m docker`
 Expected: PASS — the response carries `from-admin` and `from-defaults`
 
-- [ ] **Step 5: Commit**
+- [x] **Step 5: Commit**
 
 ```bash
 git add src/porter/config.py src/porter/systemd.py tests/test_config.py tests/test_service_e2e.py tests/conftest.py
@@ -629,7 +652,7 @@ git commit -m "feat(config): split package-owned defaults from admin-owned env; 
 
 This is the stage that was missing: Tasks 1–3 build primitives, Tasks 6–8 assume a working `porter build`, and nothing composed them. Without it `cli.build` only prints.
 
-- [ ] **Step 1: Write the failing tests**
+- [x] **Step 1: Write the failing tests**
 
 ```python
 # tests/test_assemble.py
@@ -695,22 +718,22 @@ def test_entrypoint_is_invoked_via_python_m_not_a_console_script(tmp_path, src_t
 
 Add a `src_tree` fixture to `tests/conftest.py`: a directory containing `src/app.py` with a trivial FastAPI app.
 
-- [ ] **Step 2: Run tests to verify they fail**
+- [x] **Step 2: Run tests to verify they fail**
 
 Run: `PORTER_REQUIRE_UV=1 uv run --extra dev pytest tests/test_assemble.py -v`
 Expected: FAIL — `ModuleNotFoundError: No module named 'porter.assemble'`
 
-- [ ] **Step 3: Implement**
+- [x] **Step 3: Implement**
 
 `assemble` must, in order: create the stage; vendor the interpreter into `usr/lib/<pkg>/python` and install `requirements` into it when `python.bundled`; copy each `source_paths` entry into `usr/lib/<pkg>/`; write `etc/<pkg>/defaults` and `usr/share/<pkg>/env.example` from `split(...)`; emit a unit into `usr/lib/systemd/system/` for `service` and `oneshot` kinds (plus a `.timer` when `schedule` is set); write a `usr/bin/<bin_name>` wrapper for `command` kind that execs `…/python/bin/python<ver> -m <module>`; and return `Staged` with `conffiles` listing every file it placed under `etc/`.
 
 Return the conffiles list — do not make the caller re-derive it. Task 2's lint refuses undeclared `etc/` files, so a wrong list fails loudly rather than shipping.
 
-- [ ] **Step 4: Run tests to verify they pass**
+- [x] **Step 4: Run tests to verify they pass**
 
 Run: `PORTER_REQUIRE_UV=1 uv run --extra dev pytest -v`
 
-- [ ] **Step 5: Wire `cli.build` end-to-end and commit**
+- [x] **Step 5: Wire `cli.build` end-to-end and commit**
 
 `porter build` must now call `assemble` then `build_deb` per component and write real `.deb` files to `--out`. Replace the printing stub.
 
@@ -731,7 +754,7 @@ git commit -m "feat(assemble): a Component becomes a packageable staged tree"
 - Consumes: `build_deb` (Task 2).
 - Produces: `write_index(repo_dir: Path) -> Path` (writes `Packages`, `Packages.gz`, `Release`); `usb_tree(debs: list[Path], out: Path, app: str, readme: str) -> Path`.
 
-- [ ] **Step 1: Write the failing tests**
+- [x] **Step 1: Write the failing tests**
 
 ```python
 # tests/test_repo.py
@@ -776,12 +799,12 @@ def test_install_then_upgrade_offline_from_the_usb_tree(two_demo_debs, tmp_path,
     assert proc.stdout.strip() == "1.0 -> 2.0", proc.stdout
 ```
 
-- [ ] **Step 2: Run tests to verify they fail**
+- [x] **Step 2: Run tests to verify they fail**
 
 Run: `uv run pytest tests/test_repo.py -v -m docker`
 Expected: FAIL — `ModuleNotFoundError: No module named 'porter.repo'`
 
-- [ ] **Step 3: Write the implementation**
+- [x] **Step 3: Write the implementation**
 
 ```python
 # src/porter/repo.py
@@ -888,12 +911,12 @@ def usb_tree(debs: list[Path], out: Path, app: str, readme: str) -> Path:
     return out
 ```
 
-- [ ] **Step 4: Run tests to verify they pass**
+- [x] **Step 4: Run tests to verify they pass**
 
 Run: `uv run pytest tests/test_repo.py -v -m docker`
 Expected: 2 passed, with `1.0 -> 2.0` proving the same command did both
 
-- [ ] **Step 5: Commit**
+- [x] **Step 5: Commit**
 
 ```bash
 git add src/porter/repo.py tests/test_repo.py
@@ -912,7 +935,7 @@ git commit -m "feat(repo): flat apt index from dpkg-deb --field, plus the USB tr
 - Consumes: `usb_tree` (Task 4).
 - Produces: `gate(usb: Path, app: str, image: str, health_url: str, seed: dict[str, str]) -> GateResult`, where `GateResult` is a dataclass with `.ok: bool` and `.failures: list[str]`.
 
-- [ ] **Step 1: Write the failing tests**
+- [x] **Step 1: Write the failing tests**
 
 ```python
 # tests/test_gate.py
@@ -949,12 +972,12 @@ def test_gate_fails_when_the_payload_is_truncated(truncated_usb, docker_image):
     assert not result.ok
 ```
 
-- [ ] **Step 2: Run tests to verify they fail**
+- [x] **Step 2: Run tests to verify they fail**
 
 Run: `uv run pytest tests/test_gate.py -v -m docker`
 Expected: FAIL — `ModuleNotFoundError: No module named 'porter.gate'`
 
-- [ ] **Step 3: Write the implementation**
+- [x] **Step 3: Write the implementation**
 
 ```python
 # src/porter/gate.py
@@ -1077,12 +1100,12 @@ grep -qiE 'pip install|apt-get install .*http|Downloading' /var/log/apt/term.log
     return r
 ```
 
-- [ ] **Step 4: Run tests to verify they pass**
+- [x] **Step 4: Run tests to verify they pass**
 
 Run: `uv run pytest tests/test_gate.py -v -m docker`
 Expected: 3 passed — the good bundle green, **both** mutations red
 
-- [ ] **Step 5: Commit**
+- [x] **Step 5: Commit**
 
 ```bash
 git add src/porter/gate.py tests/test_gate.py
@@ -1104,7 +1127,7 @@ git commit -m "feat(gate): prove bundles offline, with controls and mutation tes
 - Consumes: everything above.
 - Produces: `Python` and `Component` dataclasses; `load(path) -> tuple[Python, list[Component]]`; `Component.kind` in `{"service", "command", "oneshot", "meta"}`; CLI `porter build|gate|publish`.
 
-- [ ] **Step 1: Write the three example manifests**
+- [x] **Step 1: Write the three example manifests**
 
 ```yaml
 # examples/command/porter.yaml — a CLI. No unit, no /etc, no state.
@@ -1168,7 +1191,7 @@ metapackages:
     depends: [porter-example-suite-api, porter-example-suite-tool]
 ```
 
-- [ ] **Step 2: Write the failing tests**
+- [x] **Step 2: Write the failing tests**
 
 ```python
 # tests/test_spec.py
@@ -1256,12 +1279,12 @@ def test_suite_metapackage_pulls_both_components(built_usb, docker_image):
     assert proc.stdout.count("install ok installed") == 2, proc.stdout
 ```
 
-- [ ] **Step 3: Run tests to verify they fail**
+- [x] **Step 3: Run tests to verify they fail**
 
 Run: `uv run pytest tests/test_spec.py -v`
 Expected: FAIL — `ModuleNotFoundError: No module named 'porter.spec'`
 
-- [ ] **Step 4: Implement `spec.py` and `cli.py`**
+- [x] **Step 4: Implement `spec.py` and `cli.py`**
 
 ```python
 # src/porter/spec.py
@@ -1357,12 +1380,12 @@ def main():
     app.main()
 ```
 
-- [ ] **Step 5: Run every test**
+- [x] **Step 5: Run every test**
 
 Run: `uv run pytest tests/ -v -m "not nspawn"`
 Expected: all green, including the three gallery tests under `-m docker`
 
-- [ ] **Step 6: Commit**
+- [x] **Step 6: Commit**
 
 ```bash
 git add src/porter/spec.py src/porter/cli.py examples/ tests/test_spec.py tests/test_examples.py
@@ -1383,7 +1406,7 @@ git commit -m "feat(examples): command, oneshot and suite shapes as gate fixture
 - Consumes: `build_deb` (Task 2), `Component` (Task 6).
 - Produces: `derive_depends(tree: Path) -> list[str]`; `launcher(pkg, url, health, name) -> str`; `desktop_entry(pkg, name, icon) -> str`.
 
-- [ ] **Step 1: Write the failing tests**
+- [x] **Step 1: Write the failing tests**
 
 ```python
 # tests/test_depends.py
@@ -1453,12 +1476,12 @@ def test_desktop_entry_is_valid(tmp_path):
         assert proc.returncode == 0, proc.stdout + proc.stderr
 ```
 
-- [ ] **Step 2: Run tests to verify they fail**
+- [x] **Step 2: Run tests to verify they fail**
 
 Run: `uv run pytest tests/test_depends.py tests/test_desktop.py -v`
 Expected: FAIL — `ModuleNotFoundError: No module named 'porter.depends'`
 
-- [ ] **Step 3: Write the implementation**
+- [x] **Step 3: Write the implementation**
 
 ```python
 # src/porter/depends.py
@@ -1570,12 +1593,12 @@ StartupWMClass={name}
 """
 ```
 
-- [ ] **Step 4: Run tests to verify they pass**
+- [x] **Step 4: Run tests to verify they pass**
 
 Run: `uv run pytest tests/test_depends.py tests/test_desktop.py -v`
 Expected: all green
 
-- [ ] **Step 5: Wire `examples/desktop-app` and gate it**
+- [x] **Step 5: Wire `examples/desktop-app` and gate it**
 
 ```bash
 uv run porter build --config examples/desktop-app/porter.yaml --out dist/
@@ -1585,7 +1608,7 @@ uv run porter gate --usb /tmp/desktop-usb --app porter-example-desktop
 
 Expected: two packages — `porter-example-desktop` (the service, no desktop deps) and `porter-example-desktop-desktop` (launcher, `.desktop`, icon, derived `Depends:`). The gate asserts the core package installs on a **headless** image where the desktop package's dependencies are absent; that is the property that keeps a server install from being blocked.
 
-- [ ] **Step 6: Commit**
+- [x] **Step 6: Commit**
 
 ```bash
 git add src/porter/depends.py src/porter/desktop.py examples/desktop-app/ tests/test_depends.py tests/test_desktop.py
