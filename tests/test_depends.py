@@ -12,7 +12,7 @@ from pathlib import Path
 
 import pytest
 
-from porter.depends import derive_depends, packages_owning
+from porter.depends import _elf_objects, _sonames, derive_depends, packages_owning
 
 
 def _elf_needing(dest: Path, soname: str) -> Path:
@@ -100,20 +100,36 @@ def test_ignores_libraries_the_payload_ships_itself(tmp_path):
 def test_ignores_an_origin_relative_soname_the_payload_ships(vendored):
     """The self-shipped exclusion has to compare basenames, not strings.
 
-    Measured: the vendored interpreter's `python3.12` carries
+    The vendored interpreter carries
     `NEEDED $ORIGIN/../lib/libpython3.12.so.1.0` -- the NEEDED entry is a
     *path*, not a bare soname, so subtracting the set of staged `.so`
     basenames from it leaves it in. It then resolves to nothing, and an
     implementation that drops what it cannot resolve reports success having
     silently discarded it, while one that refuses the unresolvable (as porter
     does, below) refuses every package it builds.
+
+    **Which object carries it is upstream's business, not porter's.** This
+    test used to objdump `python/bin/python3.12` by name, and that spelling of
+    the control went stale between two python-build-standalone builds of the
+    same 3.12 series (measured 2026-08-10): in 3.12.8 the interpreter binary
+    links libpython dynamically and carries the entry; in 3.12.13 libpython is
+    linked into the binary and the `$ORIGIN` entry lives in
+    `lib/libpython3.so` instead. Nothing about porter changed and the
+    regression it guards is exactly as live -- only the file moved. So the
+    control asks the tree, not one path in it, and it is still a control: if
+    no object in the vendored tree carries a path-shaped NEEDED, this test
+    proves nothing and says so rather than passing.
     """
-    needed = subprocess.run(
-        ["objdump", "-p", str(vendored / "python/bin/python3.12")],
-        capture_output=True, text=True).stdout
-    assert "$ORIGIN/../lib/libpython3.12.so.1.0" in needed, (
-        "this interpreter build no longer carries the $ORIGIN NEEDED entry this "
-        "test is the regression test for; re-measure before deleting it"
+    origin_relative = {
+        obj: sorted(so for so in _sonames(obj) if "/" in so)
+        for obj in _elf_objects(vendored)
+    }
+    carriers = {obj: sos for obj, sos in origin_relative.items() if sos}
+    assert carriers, (
+        "no object in this vendored tree carries a NEEDED entry that is a path "
+        "rather than a bare soname, so the basename comparison this test is the "
+        "regression test for is not exercised here at all; re-measure against "
+        "the current interpreter build before deleting it"
     )
     assert not any("python" in d for d in derive_depends(vendored)), derive_depends(vendored)
 
@@ -216,6 +232,21 @@ def test_refuses_a_library_no_package_owns(tmp_path):
         packages_owning([unowned])
 
 
+def test_refuses_an_unowned_library_under_an_aliased_root_too():
+    """The usr-merge alias must not become a way to be owned by nothing.
+
+    `/lib/x86_64-linux-gnu` is exactly where a vendor tarball drops a library,
+    and it is also the root that now gets a second spelling asked of dpkg. The
+    refusal above uses a tmp_path, which has only one name, so on its own it
+    would stay green if the alias lookup ever started answering for a path
+    neither spelling owns. Both spellings must miss.
+    """
+    with pytest.raises(RuntimeError, match="libhandmade"):
+        packages_owning([Path("/lib/x86_64-linux-gnu/libhandmade.so.1")])
+    with pytest.raises(RuntimeError, match="libhandmade"):
+        packages_owning([Path("/usr/lib/x86_64-linux-gnu/libhandmade.so.1")])
+
+
 def test_packages_owning_maps_a_real_library(tmp_path):
     """The positive control for the refusal above.
 
@@ -226,3 +257,44 @@ def test_packages_owning_maps_a_real_library(tmp_path):
     path = next(line.strip().split()[-1] for line in libc.splitlines()
                 if line.strip().startswith("libc.so.6 "))
     assert packages_owning([Path(path)]) == ["libc6"]
+
+
+def test_either_spelling_of_a_usr_merged_path_maps_to_the_same_package():
+    """`ldconfig -p` and dpkg's database disagree about /lib versus /usr/lib.
+
+    Both are true names for the same file -- `/lib` is a symlink to `/usr/lib`
+    on every release porter supports -- but `dpkg -S` matches its *recorded*
+    string and nothing else, so asking it the question in the wrong spelling
+    gets "no path found matching pattern" for a library the host obviously has.
+
+    Measured 2026-08-10, one container per release, `ldconfig -p` against
+    `dpkg -S` on the path it printed:
+
+        ubuntu 22.04   ldconfig /lib/...      dpkg /lib/...        agree
+        debian 12      ldconfig /lib/...      dpkg /lib/...        agree
+        ubuntu 24.04   ldconfig /lib/...      dpkg /usr/lib/...    DISAGREE
+        debian 13      ldconfig /lib/...      dpkg /usr/lib/...    DISAGREE
+        ubuntu 26.04   ldconfig /usr/lib/...  dpkg /usr/lib/...    agree
+
+    So porter derived `Depends:` correctly on its build floor and on the
+    newest release, and refused *every* package in between -- including on
+    `ubuntu-latest`, which is why CI was red while zion was green. The refusal
+    is the honest failure of the two, but it is still a build porter cannot
+    do on two of the five releases it claims.
+
+    This asserts both spellings, whichever one the host records, so it is red
+    on every one of those releases before the fix: exactly one of the two
+    always misses.
+    """
+    cache = subprocess.run(["ldconfig", "-p"], capture_output=True, text=True).stdout
+    recorded = Path(next(line.strip().split()[-1] for line in cache.splitlines()
+                         if line.strip().startswith("libc.so.6 ")))
+    parts = recorded.parts
+    other = (Path("/", *parts[2:]) if parts[1] == "usr"
+             else Path("/usr", *parts[1:]))
+    assert other.exists() and other.samefile(recorded), (
+        f"control: {other} is meant to be the other spelling of {recorded} and "
+        "this host does not resolve it to the same file, so the test below "
+        "would be asserting something other than the usr-merge alias"
+    )
+    assert packages_owning([recorded]) == packages_owning([other]) != []

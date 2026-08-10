@@ -1011,6 +1011,17 @@ check "T8 a soname the build host cannot resolve is refused" src/porter/depends.
 # says nothing about the one apt cannot deliver.
 check "T8 a library no package owns is refused" src/porter/depends.py \
   's = s.replace("    if unowned:", "    if False:")' tests/test_depends.py
+# Task 15. `ldconfig -p` and dpkg disagree about /lib vs /usr/lib on ubuntu
+# 24.04 and debian 13 -- both true names for one file, and dpkg matches only
+# the string it recorded. Removed, the lookup asks in ldconfig's spelling
+# alone and porter refuses to build ANY package on those two releases, which
+# is what took CI red on ubuntu-latest while zion (26.04) stayed green. Not a
+# short list this time but a total refusal, which is the honest half of the
+# failure -- it is still a build porter cannot do.
+check "T15 a usr-merged path is looked up under both spellings" \
+  src/porter/depends.py \
+  's = s.replace("    spellings = {p: [p, *filter(None, [usr_merge_alias(p)])] for p in paths}", "    spellings = {p: [p] for p in paths}")' \
+  tests/test_depends.py
 # The vendored interpreter ships libpython3.12.so.1.0 and links it as
 # `$ORIGIN/../lib/libpython3.12.so.1.0` -- a PATH, not a bare soname. Without
 # the basename comparison the tree'"'"'s own library is read as a system

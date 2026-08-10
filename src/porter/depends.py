@@ -138,22 +138,56 @@ def resolve_sonames(sonames: list[str]) -> list[Path]:
     return [Path(cache[so]) for so in sonames]
 
 
+# The usr-merge aliased directories: each is a symlink to its /usr counterpart
+# on every release porter supports. Debian's own list, and the reason a library
+# has two equally true names.
+ALIASED_ROOTS = ("bin", "sbin", "lib", "lib32", "lib64", "libx32")
+
+
+def usr_merge_alias(path: Path) -> Path | None:
+    """The other spelling of a usr-merged path, or None if it has only one.
+
+    `/lib/x86_64-linux-gnu/libc.so.6` and `/usr/lib/x86_64-linux-gnu/libc.so.6`
+    are the same file, and which one a tool says is not a matter of taste --
+    `ldconfig -p` and dpkg's database each pick one, and they *disagree* on two
+    of the five releases porter supports (measured 2026-08-10, container per
+    release: agree on ubuntu 22.04, debian 12 and ubuntu 26.04; disagree on
+    ubuntu 24.04 and debian 13, where ldconfig still says /lib and dpkg has
+    recorded /usr/lib). `dpkg -S` matches the string it recorded, so on those
+    two every derivation asked the question in a spelling dpkg has never heard
+    and porter refused to build anything at all.
+
+    Only the aliased roots get a second name: `/usr/local/lib/libfoo.so` and
+    `/opt/...` have exactly one, which is what keeps the refusal below intact
+    for a library that really is hand-installed.
+    """
+    parts = PurePosixPath(path).parts
+    if parts[:2] == ("/", "usr") and len(parts) > 3 and parts[2] in ALIASED_ROOTS:
+        return Path("/", *parts[2:])
+    if parts[:1] == ("/",) and len(parts) > 2 and parts[1] in ALIASED_ROOTS:
+        return Path("/usr", *parts[1:])
+    return None
+
+
 def packages_owning(paths: list[Path]) -> list[str]:
     """The packages that own each library, in one `dpkg -S`.
 
     One call and not one per file: `dpkg -S` reads the whole file list of every
     installed package, and 32 invocations of it is what turns a browser tree's
-    derivation from seconds into minutes.
+    derivation from seconds into minutes. Both spellings of a usr-merged path
+    go into that same one call for the same reason.
 
-    A path no package owns is refused. Anything hand-installed under
-    /usr/local, or dropped in by a vendor tarball, resolves perfectly on the
-    build host and maps to nothing -- and apt on the client cannot deliver a
-    file that came from a tarball here.
+    A path no package owns *under either name* is refused. Anything
+    hand-installed under /usr/local, or dropped in by a vendor tarball,
+    resolves perfectly on the build host and maps to nothing -- and apt on the
+    client cannot deliver a file that came from a tarball here.
     """
     if not paths:
         return []
-    proc = subprocess.run(["dpkg", "-S", *(str(p) for p in paths)],
-                          capture_output=True, text=True)
+    spellings = {p: [p, *filter(None, [usr_merge_alias(p)])] for p in paths}
+    proc = subprocess.run(
+        ["dpkg", "-S", *(str(q) for alts in spellings.values() for q in alts)],
+        capture_output=True, text=True)
     owners: dict[str, set[str]] = {}
     for line in proc.stdout.splitlines():
         if ": " not in line:
@@ -163,7 +197,8 @@ def packages_owning(paths: list[Path]) -> list[str]:
         # name, and a Depends: carrying it pins the package to one architecture.
         owners.setdefault(path.strip(), set()).update(
             n.strip().split(":")[0] for n in names.split(","))
-    unowned = [str(p) for p in paths if str(p) not in owners]
+    unowned = [str(p) for p, alts in spellings.items()
+               if not any(str(q) in owners for q in alts)]
     if unowned:
         raise RuntimeError(
             f"no package owns {', '.join(unowned)} on this build host, so there "
