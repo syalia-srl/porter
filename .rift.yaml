@@ -1,0 +1,46 @@
+# Doc-drift gates for porter. Run with `make lint-docs`.
+# The contract: vault/Atlas/Know-how/writing-agent-docs.md in the workspace.
+# All rules are warnings until the list is empty for reasons Alex agrees with.
+
+rules:
+
+  # A doc that names a file nobody wrote, or one renamed since, sends every reader
+  # to a dead path. Workspace-relative pointers are skipped.
+  - name: "every file path named in the agent docs exists"
+    severity: warning
+    extract:
+      file: ["AGENTS.md", "DESIGN.md", "know-how/*.md"]
+      regex: '`((?!repos/|vault/|bin/|https?:)[A-Za-z0-9_-]+/[A-Za-z0-9_./-]+\.(?:md|ya?ml|py|toml|json|sh))`'
+    require:
+      exists: true
+
+  # The know-how menu is `make know-how`. A doc without a single-line when: is
+  # missing from it, so nobody finds it.
+  - name: "every know-how doc carries a single-line when: in its frontmatter"
+    severity: warning
+    contain:
+      in: "know-how/*.md"
+      zone: { before: '^# ' }
+      matches: '\A---\n(?:.*\n)*?when: \S.*\n(?:.*\n)*?---\n'
+
+  # A hand-kept list of know-how docs goes stale; the menu replaces it. forbid
+  # masks inline code, so this extracts from the raw file and requires each name
+  # to appear in a file that never exists: any extracted name is reported.
+  - name: "AGENTS.md names no individual know-how doc"
+    severity: warning
+    extract:
+      file: "AGENTS.md"
+      regex: '(know-how/[A-Za-z0-9_-]+\.md)'
+    require:
+      in: "this-file-never-exists.md"
+
+  # Status is derivable from git, CHANGELOG.md and TASKS.md, and goes false one
+  # commit later. porter's old AGENTS.md carried 156 lines of it.
+  - name: "AGENTS.md and DESIGN.md carry no status log"
+    severity: warning
+    extract:
+      list: ['Task \d+ done', '\d+ tests\b', 'shipped \(20\d\d-', 'as of 20\d\d-', 'current status', 'not yet implemented']
+    forbid:
+      in: ["AGENTS.md", "DESIGN.md"]
+      as: regex
+      case_insensitive: true

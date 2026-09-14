@@ -1,10 +1,8 @@
-# know-how: shipping a SQLite database inside a package
+---
+when: a package's payload includes a SQLite database built by a bake step (a corpus, a search index, a beaver store); or a client reports empty results, missing recent rows or 'attempt to write a readonly database' that never reproduce on the build host
+---
 
-*When to reach for it:* a package's payload includes a SQLite database — a
-corpus, a search index, a beaver store — built by a `bake:` step. Also when a
-client reports empty results, missing recent rows, or
-`attempt to write a readonly database`, none of which reproduce on the build
-host.
+# know-how: shipping a SQLite database inside a package
 
 **The rule:** a shipped database must be **checkpointed** and **out of WAL
 mode**. Two separate mistakes, two separate one-line fixes, and neither is

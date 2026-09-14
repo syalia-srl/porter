@@ -1,8 +1,8 @@
-# know-how: proving a guard actually bites
+---
+when: you added or changed a guard (a lint rule, a validation, a refusal) and must show it bites; reviewing someone else's mutation evidence; or before a release
+---
 
-*When to reach for it:* you have added or changed a guard — a lint rule, a
-validation, a refusal — and need to show it works. Also when reviewing someone
-else's mutation evidence, or before a release.
+# know-how: proving a guard actually bites
 
 **The rule this serves:** a check that cannot fail is worth less than no check,
 because it licenses shipping. Every silent-success bug found in porter so far was
