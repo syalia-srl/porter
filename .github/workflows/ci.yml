@@ -29,7 +29,7 @@ on:
 # it exports a Debian root through docker, boots it `--private-network --boot`,
 # comes up with systemd as PID 1, reports `systemd-detect-virt --container` =
 # systemd-nspawn, isolates to `lo` alone, and applies ProtectSystem=strict to a
-# transient unit. So the hole AGENTS.md's rule pointed at is closed rather than
+# transient unit. So the hole a skipped nspawn test left is closed rather than
 # excused: the only tests in porter that start a unit with systemd cannot
 # silently skip here.
 env:

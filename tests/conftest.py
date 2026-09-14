@@ -22,7 +22,7 @@ def _require_uv() -> None:
 
     Most of this suite needs a real uv, and `pytest.skip` is the right local
     behaviour on a laptop that hasn't got one. On a gate it is the failure mode
-    AGENTS.md exists to prevent: pytest exits 0 with essentially nothing
+    `make test` exists to prevent: pytest exits 0 with essentially nothing
     verified. Set PORTER_REQUIRE_UV=1 wherever the run is meant to be evidence
     and the absence becomes loud instead.
     """

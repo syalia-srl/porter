@@ -6,7 +6,7 @@ shows:
 - **Write to `$STATE_DIRECTORY`, never to a path of your own choosing.** systemd
   exports it because it created the directory -- `/var/lib/<pkg>`, owned by the
   unit's static user -- and it is the one place the package itself never writes
-  (AGENTS.md rule 6). A job that writes elsewhere works on the build host and
+  (DESIGN.md rule 6). A job that writes elsewhere works on the build host and
   hits a read-only filesystem on the client, because the unit runs under
   `ProtectSystem=strict`.
 - **Exit non-zero when the work did not happen.** `Type=oneshot` makes systemd

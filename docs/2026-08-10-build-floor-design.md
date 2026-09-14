@@ -74,8 +74,8 @@ This is the same failure class as the bug fixed in `e02d1e1`, where `ldconfig -p
 and dpkg disagreed about `/lib` versus `/usr/lib` and porter refused every
 package on the two releases in between. That one was caught because CI ran on a
 different release than zion — accidentally, not by design. The standing warning
-in `AGENTS.md` says it outright: *zion is 26.04 and `ubuntu-latest` is 24.04, so
-a green local suite is not evidence about the runner.*
+above `make test` in the `Makefile` says it outright: a green run on zion (26.04)
+is evidence about that host only, not about `ubuntu-latest` (24.04).
 
 ## Mechanism 1: the cross-target resolve check
 

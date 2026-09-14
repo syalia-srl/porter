@@ -42,7 +42,7 @@ declared minimum of zero is refused: an empty SQLite file exists.
 *Read the rc directly, and do not let a pipe launder it.* Steps run under
 `bash -e -o pipefail`, so `build_corpus.py | tee build.log` reports the
 builder's failure and not `tee`'s success. Without `pipefail` that step is a
-gate that cannot fail, which is worth less than no gate at all (AGENTS.md).
+gate that cannot fail, which is worth less than no gate at all (DESIGN.md, the gate rule).
 """
 from __future__ import annotations
 
@@ -106,7 +106,7 @@ def _bash() -> str:
     Falling back to `sh` would quietly drop `pipefail` -- the difference between
     a step that reports its builder's failure and one that reports `tee`'s
     success. A gate that disarms itself on a host missing a tool is the exact
-    silence AGENTS.md's three PORTER_REQUIRE_* variables exist to end.
+    silence the PORTER_REQUIRE_* variables in `make test` exist to end.
     """
     bash = shutil.which("bash")
     if bash is None:

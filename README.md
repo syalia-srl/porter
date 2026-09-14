@@ -151,8 +151,8 @@ by the only test that matters.
 
 ## Where to read next
 
-- [`AGENTS.md`](AGENTS.md) — the door: the rules that are not negotiable, and an
-  index into `know-how/`.
+- [`AGENTS.md`](AGENTS.md) — what porter is, who it is for, and what done means.
+- [`DESIGN.md`](DESIGN.md) — the rules that are not negotiable, each with its reason.
 - [`docs/design-spec.md`](docs/design-spec.md) — the design, with the
   measurement behind each decision.
 - [`CHANGELOG.md`](CHANGELOG.md) — what 0.1.0 is, what it is not, and the known

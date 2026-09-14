@@ -798,7 +798,7 @@ def _refuse_a_hook_that_produced_nothing(component: Component,
     So both halves are checked, and the second is the one that matters: a stage
     can hold twenty files and zero bytes. `touch` is what a half-written render
     step leaves behind, and "the file is there" and "the file is real" are
-    different questions (AGENTS.md; a 30,912-byte package once passed every path
+    different questions (DESIGN.md's gate rule; a 30,912-byte package once passed every path
     assertion in this suite).
 
     Zero is the floor because zero is the only floor that is not a guess about

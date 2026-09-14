@@ -7,7 +7,7 @@
 # `kind: command` has been implemented since Task 4 and refused three shapes by
 # name, and until this file existed the gallery could not say what a correct
 # command manifest looked like -- which is the same as saying the kind had no
-# schema. AGENTS.md: a field with no example exercising it does not exist.
+# schema. DESIGN.md: a field with no example exercising it does not exist.
 #
 # What porter emits for this manifest, and nothing else:
 #

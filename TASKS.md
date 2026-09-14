@@ -15,7 +15,7 @@ built**. Each item's first step is therefore the same: write the implementation
 plan into `docs/plans/`, using `superpowers:writing-plans`. The two slice plans
 already in `docs/plans/` are the model for shape and detail.
 
-Read `docs/design-spec.md` and `AGENTS.md` first — the non-negotiable rules and
+Read `docs/design-spec.md` and `DESIGN.md` first — the non-negotiable rules and
 the gate rule govern all four.
 
 ---

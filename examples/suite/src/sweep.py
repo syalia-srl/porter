@@ -2,7 +2,7 @@
 
 `$STATE_DIRECTORY` and not a path of its own choosing -- systemd exports it
 because it created `/var/lib/<pkg>` and owns it to the unit's static user, and
-that is the one tree the package itself never writes to (AGENTS.md rule 6).
+that is the one tree the package itself never writes to (DESIGN.md rule 6).
 Under `ProtectSystem=strict` anywhere else is read-only anyway, so a job that
 picks its own directory works on the build host and fails on the client.
 """

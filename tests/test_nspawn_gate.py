@@ -59,7 +59,7 @@ def require_nspawn() -> None:
     exports a Debian root through docker, boots it `--private-network --boot`
     with systemd as PID 1, isolates to `lo` alone, and applies
     `ProtectSystem=strict` to a transient unit -- in 33 seconds. So the hole
-    AGENTS.md's rule pointed at is closed rather than excused.
+    a skipped nspawn test left is closed rather than excused.
     """
     reason = nspawn_available()
     if reason is None:

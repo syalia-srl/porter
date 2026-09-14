@@ -256,7 +256,7 @@ def test_a_hook_that_wrote_only_empty_files_is_refused_by_magnitude(tmp_path):
     Twenty files that all exist and none of which has anything in it is what a
     render step that failed halfway leaves behind, and it passes every check
     that asks whether a path is there -- including the one above. A 30,912-byte
-    package once passed every path assertion in this repo (AGENTS.md), which is
+    package once passed every path assertion in this repo (DESIGN.md, the gate rule), which is
     why the predicate is bytes and not entries.
     """
     proj = _project(tmp_path, """

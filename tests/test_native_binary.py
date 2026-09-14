@@ -52,7 +52,7 @@ def _require_cc() -> None:
     can only skip them, and a skipped test is green. On anything that is meant
     to be evidence, PORTER_REQUIRE_CC=1 turns the skip into a failure. It is in
     `.github/workflows/ci.yml`'s `env:` block for that reason; a variable that
-    exists and is never armed is the silence AGENTS.md is about.
+    exists and is never armed is the silence DESIGN.md's gate rule is about.
     """
     if shutil.which("cc"):
         return

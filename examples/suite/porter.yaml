@@ -111,7 +111,7 @@ components:
 
 # One name per machine role. The whole block is what this example exists to
 # define: no other manifest in the gallery declares it, and a field with no
-# example exercising it does not exist (AGENTS.md).
+# example exercising it does not exist (DESIGN.md).
 #
 # `depends:` names PACKAGES, not component names -- `porter-example-suite-api`,
 # not `api`. That is the opposite of `after:`, which names components, and the
